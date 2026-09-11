@@ -1,0 +1,4 @@
+[
+  { "id": 1, "prompt": "The sky is blue. Type Yes or No.", "answer": "yes" },
+  { "id": 2, "prompt": "2 + 2 equals 5. Type Yes or No.", "answer": "no" }
+]
