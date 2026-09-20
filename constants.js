@@ -1,7 +1,7 @@
 // custom_id scheme + tunables for the trivia flow.
 //
 // A session id (`sid`) is threaded as a suffix on every component custom_id so the
-// router in app.js can recover which session a click belongs to. `sid` is generated
+// router in flow.js can recover which session a click belongs to. `sid` is generated
 // WITHOUT underscores (see state.js — crypto.randomUUID() with dashes stripped), which
 // keeps `answer_<sid>_<qIndex>_<value>` unambiguous to split on "_".
 
@@ -11,7 +11,7 @@ export const QUESTION_TIMEOUT_MS = 10_000; // per-question answer window
 export const LOBBY_COUNTDOWN_MS = 60_000; // public lobby countdown before questions auto-start
 
 // Game modes shown in the ephemeral picker (CONTEXT.md §6 step 1). Data-driven so
-// app.js / trivia.js can render buttons from this list. Only `enabled` modes do
+// flow.js / trivia.js can render buttons from this list. Only `enabled` modes do
 // anything this sprint.
 export const MODES = [
   { key: 'fifthgrader', label: 'Are You Smarter Than a Fifth Grader', enabled: true },

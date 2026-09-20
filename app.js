@@ -1,40 +1,36 @@
 import 'dotenv/config';
-import express from 'express';
-import { verifyKeyMiddleware } from 'discord-interactions';
+import { Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 import { handleInteraction } from './flow.js';
 
-// Create an express app
-const app = express();
-// Get port, or default to 3000
-const PORT = process.env.PORT || 3000;
+if (!process.env.DISCORD_TOKEN) {
+  console.error('DISCORD_TOKEN is missing — add it to .env (see .env.sample).');
+  process.exit(1);
+}
 
-/**
- * Interactions endpoint URL where Discord will send HTTP requests.
- * Parses the request body and verifies incoming requests using discord-interactions.
- *
- * The flow logic lives in flow.js:handleInteraction(reqBody) so it can be unit-
- * tested / smoke-tested without Discord. It returns { status?, body, after? }:
- *   - `body`   the synchronous interaction response (sent within Discord's ~3s window)
- *   - `status` optional HTTP status (defaults to 200)
- *   - `after`  optional async work (DiscordRequest POST/PATCH) run AFTER the response
- */
-app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async function (req, res) {
-  let result;
-  try {
-    result = await handleInteraction(req.body);
-  } catch (err) {
+// Gateway bot: we open a websocket to Discord and it pushes interactions down it, so
+// there is no HTTP server, tunnel, or Interactions Endpoint URL. Slash commands and
+// buttons need no privileged intents — `Guilds` is enough.
+//
+// The flow logic lives in flow.js:handleInteraction(interaction) so it can be
+// smoke-tested without Discord (scripts/smoke.js).
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+client.once(Events.ClientReady, (c) => {
+  console.log(`Logged in as ${c.user.tag}`);
+});
+
+client.on(Events.InteractionCreate, (interaction) => {
+  handleInteraction(interaction).catch((err) => {
     console.error('interaction handler error', err);
-    if (!res.headersSent) res.status(500).send({ error: 'internal error' });
-    return;
-  }
-
-  res.status(result.status || 200).send(result.body);
-
-  if (typeof result.after === 'function') {
-    result.after().catch((err) => console.error('post-response task failed', err));
-  }
+    // Best effort: tell the user instead of leaving them on "interaction failed".
+    const notice = { content: 'Something went wrong — try `/start` again.', flags: MessageFlags.Ephemeral };
+    const send = interaction.deferred || interaction.replied
+      ? interaction.followUp(notice)
+      : interaction.reply(notice);
+    send.catch(() => {});
+  });
 });
 
-app.listen(PORT, () => {
-  console.log('Listening on port', PORT);
-});
+client.on(Events.Error, (err) => console.error('discord client error', err));
+
+client.login(process.env.DISCORD_TOKEN);

@@ -8,10 +8,12 @@
 
 ## 0. Status — walking-skeleton MVP
 
-**Built and verified live on 2026-09-10.** A single user can run `/start`, pick the game
+**Built and verified live on 2026-09-10 (as an HTTP-interactions bot; since migrated to a
+discord.js gateway bot, see §1).** A single user can run `/start`, pick the game
 mode, pass both confirmation screens, land in the public lobby, and play both questions to
-completion. Also covered by an offline test: `node scripts/smoke.js` (stubs `fetch`, drives
-the whole flow, asserts the response types and REST calls).
+completion. Also covered by an offline test: `node scripts/smoke.js` (fake discord.js
+client, drives the whole flow, asserts the reply method at each step and the channel
+sends/edits).
 
 ### What the MVP does (implemented)
 
@@ -55,21 +57,23 @@ the whole flow, asserts the response types and REST calls).
 ### Implementation notes
 
 - **Message style is classic** `{ content, components }` (string + action rows) everywhere.
-  Components V2 / `TEXT_DISPLAY` is deliberately not used — simpler, and avoids the extra
-  flag on the bot-token REST posts.
-- **Ephemeral** screens (mode picker / confirm / solo-teams) use
-  `InteractionResponseType.UPDATE_MESSAGE` with `flags: InteractionResponseFlags.EPHEMERAL`.
-- **Public messages** (lobby, questions, completion) are created and edited with the **bot
-  token** via `DiscordRequest`:
-  - create: `POST channels/{channel_id}/messages`
-  - edit: `PATCH channels/{channel_id}/messages/{message_id}`
-  The session stores `channelId` + `messageId` so timer callbacks can edit without an
-  interaction in hand. (`token` is also stored but currently unused.)
+  Components V2 / `TEXT_DISPLAY` is deliberately not used — simpler.
+- **Ephemeral** screens (mode picker / confirm / solo-teams) are opened with
+  `interaction.reply({ flags: MessageFlags.Ephemeral })` and then edited in place with
+  `interaction.update(...)` (an update keeps the message ephemeral).
+- **Public messages** (lobby, questions, completion) are posted / edited **by channel id**
+  through the discord.js client, not through an interaction:
+  - create: `client.channels.fetch(channelId)` → `channel.send(payload)`
+  - edit: `channel.messages.edit(messageId, payload)`
+  The session stores `channelId` + `messageId` so timer callbacks can post/edit without an
+  interaction in hand. Buttons on a public message (Cancel, Yes/No) edit it directly with
+  `interaction.update(...)`.
 - **Timers** are `setTimeout` handles kept on the session (`state.js` `setTimer` /
   `clearTimer`). Callbacks are re-guarded (`status === 'in_progress'`, `qIndex` matches,
   no existing answer for that `qIndex`) so a late click + a firing timeout can't
-  double-advance. Handles are `.unref()`'d so a pending timer never keeps the process alive
-  on its own (Express does).
+  double-advance. Session state is always mutated **before** the first `await` in a
+  handler for the same reason. Handles are `.unref()`'d so a pending timer never holds the
+  process open on its own (the gateway connection does that).
 - **All state is in-memory** (`state.js`, a `Map` keyed by `sid`). Lost on restart. Assumes
   one process and, in practice, one active session per channel.
 - **`sid`** = `crypto.randomUUID()` with dashes stripped (32 hex chars, no underscores) so
@@ -93,9 +97,13 @@ scope.
 Questions are loaded from a file, not hard-coded. **MVP: a JSON file** (`§7`). **Later: a
 Markdown question bank** (`§7 Later`).
 
-This is an **HTTP-interactions bot** — no gateway/websocket connection, so it never shows
-"online" in the member list. Discord reaches it by POSTing signed requests to the
-`/interactions` endpoint, which is why local dev needs a public HTTPS tunnel (see README).
+This is a **gateway bot** (discord.js). It holds a websocket connection to Discord, shows
+online, and needs no public URL or tunnel — `npm start` is the whole run procedure. It was
+an HTTP-interactions bot (Express + signed POSTs to `/interactions`) until the gateway
+migration; the tunnel / Interactions Endpoint URL step was the main dev-time pain point,
+and live Teams play (§9) suits a persistent connection better. The Interactions Endpoint
+URL in the Developer Portal **must stay empty**, otherwise Discord routes interactions
+there instead of the gateway.
 
 ---
 
@@ -104,50 +112,46 @@ This is an **HTTP-interactions bot** — no gateway/websocket connection, so it 
 ### Request path
 
 ```
-Discord  ──POST /interactions──▶  app.js
-                                    │  verifyKeyMiddleware  (checks signature vs PUBLIC_KEY)
-                                    ▼
-                                  flow.js  handleInteraction(reqBody) ─▶ { status?, body, after? }
-                                    │
-              app.js sends `body` (the one synchronous interaction response)
-                                    │
-              then runs `after()` ─▶ DiscordRequest POST/PATCH to channels/{id}/messages
+Discord ══gateway websocket══▶ app.js   (discord.js Client, intents: Guilds)
+                                 │  Events.InteractionCreate
+                                 ▼
+                               flow.js  handleInteraction(interaction)
+                                 │
+        replies via the interaction ─▶ interaction.reply / update / deferUpdate
+        bot-initiated messages      ─▶ client.channels.fetch(id) → send / messages.edit
 ```
 
-- **An interaction response is the HTTP response** to Discord's POST — exactly one
-  synchronous reply per interaction. Anything after that is a REST call via `DiscordRequest`
-  (`utils.js`), which authenticates with the bot token.
-- `flow.js` returns `{ status?, body, after? }`. `app.js` sends `body`, then invokes
-  `after()` for the follow-up REST work, so the ~3s ack deadline is never blocked on a
-  network call.
+- **Each interaction must be acknowledged within ~3s** (`reply`, `update` or
+  `deferUpdate`). Handlers acknowledge first and do the slower follow-up work (posting the
+  lobby, advancing questions) afterwards.
+- `app.js` catches handler errors and sends the user a short ephemeral notice rather than
+  leaving them on "interaction failed".
+- `utils.js` `DiscordRequest` / `InstallGlobalCommands` remain only for
+  `npm run register` (`commands.js`); the running bot doesn't use them.
 
 ### Discord mechanics used
 
-- **Ephemeral** = `InteractionResponseFlags.EPHEMERAL`; only the invoking user sees it.
+- **Ephemeral** = `MessageFlags.Ephemeral`; only the invoking user sees it.
 - **`custom_id` is the router key and carries state** — every id ends with `_<sid>`.
   `parseCustomId` (`constants.js`) turns an id into `{ kind, sid, ...extra }` (table in §6).
-- **User id by context**: `req.body.context === 0` (guild) → `req.body.member.user.id`;
-  otherwise → `req.body.user.id`.
-- **Edit / delete a channel message the bot posted**: `PATCH` / `DELETE`
-  `channels/{channel_id}/messages/{message_id}` with the bot token.
+- **User id**: `interaction.user.id` (discord.js resolves guild vs. DM for us).
+- **Edit a channel message the bot posted**: `channel.messages.edit(messageId, payload)`.
 - **`<t:UNIX:R>`** in message content renders as a live, client-side relative countdown —
   used for the lobby so the bot never has to poll-edit the message.
-- **discord-interactions v4** `verifyKeyMiddleware` throws at construction if `PUBLIC_KEY`
-  is falsy, so `.env` must be populated before the server starts.
+- **Intents**: only `Guilds`. Slash commands and button clicks need no privileged intents.
 
 ---
 
 ## 3. Tech stack
 
 - **Node.js ≥ 18**, ES modules (`"type": "module"`).
-- **express@^4** — the `/interactions` endpoint.
-- **discord-interactions@^4** — `verifyKeyMiddleware`, response/type enums.
-- **dotenv** — loads `.env` (`APP_ID`, `DISCORD_TOKEN`, `PUBLIC_KEY`).
+- **discord.js@^14** — gateway client, interaction replies, channel send/edit.
+- **dotenv** — loads `.env` (`APP_ID`, `DISCORD_TOKEN`).
 - **nodemon** (dev) — `npm run dev`.
 - No question-parser dependency — the MVP reads JSON with `fs.readFileSync` + `JSON.parse`.
 
-Running it end to end (credentials, `npm run register`, `npm start`, tunnel, endpoint URL,
-invite) is covered step by step in the README.
+Running it end to end (credentials, `npm run register`, `npm start`, invite) is covered
+step by step in the README.
 
 ---
 
@@ -159,9 +163,9 @@ discord-trivia-bot/
 ├── README.md               -> setup / run instructions
 ├── package.json
 ├── package-lock.json
-├── .env.sample             -> APP_ID / DISCORD_TOKEN / PUBLIC_KEY (placeholders)
+├── .env.sample             -> APP_ID / DISCORD_TOKEN (placeholders)
 ├── .gitignore              -> node_modules, .env
-├── app.js                  -> thin Express shell: verify -> handleInteraction -> send -> after()
+├── app.js                  -> thin gateway shell: discord.js Client -> handleInteraction(interaction)
 ├── flow.js                 -> handleInteraction() + all screen handlers + timer helpers
 ├── commands.js             -> registers the /start command
 ├── constants.js            -> cid.* builders, parseCustomId, MODES, *_MS tunables
@@ -172,7 +176,7 @@ discord-trivia-bot/
 │   └── aystafg.json        -> [{ id, prompt, answer }]  (answer: "yes" | "no")
 │                              "aystafg" = Are You Smarter Than A Fifth Grader
 └── scripts/
-    └── smoke.js            -> offline end-to-end test (node scripts/smoke.js)
+    └── smoke.js            -> offline end-to-end test w/ fake client (node scripts/smoke.js)
 ```
 
 Not created yet (future sprints): `scoreboard.js`, `data/scoreboard.json`,
@@ -219,7 +223,6 @@ Session object (`state.js` `createSession`):
   status: 'picking',     // 'picking' | 'lobby' | 'in_progress' | 'complete' | 'cancelled'
   questionIndex: 0,
   answers: [],           // { qIndex, value, correct, timedOut? }
-  token: null,           // interaction token (stored, currently unused)
   messageId: null,       // id of the current public message being edited
   timer: null,           // active setTimeout handle
   createdAt,
@@ -228,7 +231,7 @@ Session object (`state.js` `createSession`):
 
 Step-by-step behaviour is the list in **§0 "What the MVP does"** — that *is* the current
 flow. Code path: `handleInteraction` (entry) → `handleComponent` (per-`kind` switch) → the
-game-loop helpers `startQuestions` → `showQuestion` (q0, PATCH) / `postQuestion` (q1+, POST)
+game-loop helpers `startQuestions` → `showQuestion` (q0, edit) / `postQuestion` (q1+, send)
 → `advance` → `onQuestionTimeout`. A component whose `sid` has no live session returns an
 ephemeral *"That trivia session expired — run `/start` again."*
 
@@ -289,7 +292,7 @@ Persist to `data/scoreboard.json` (gitignored, created on first write), in-memor
 {
   "users": {
     "<discordUserId>": {
-      "displayName": "Jaden",
+      "displayName": "<nickname>",
       "overall": { "wins": 0, "correctGuesses": 0, "gamesPlayed": 0 },
       "modes": { "fifthgrader": { "wins": 0, "correctGuesses": 0, "gamesPlayed": 0 } }
     }
@@ -329,6 +332,9 @@ multiple instances.
 7. Markdown question bank + parser; real questions.
 8. Scoreboard + `/scoreboard` + persistence.
 9. Teams mode + multiplayer lobby (§6 "Later").
+
+Done between 6 and 7: ~~Migrate from HTTP interactions (Express + tunnel) to a discord.js
+gateway bot, solo flow unchanged.~~ ✅ (2026-09-19; smoke test passes, bot logs in)
 
 ---
 

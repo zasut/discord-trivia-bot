@@ -1,33 +1,30 @@
 // Interaction flow logic for the walking-skeleton MVP (CONTEXT.md §0).
 //
-// The Express route in app.js is a thin shell: it runs verifyKeyMiddleware and
-// then calls `handleInteraction(req.body)`. That function returns
-//   { status?, body, after? }
-// where `body` is the synchronous interaction response Discord needs within ~3s,
-// `status` is an optional HTTP status (defaults to 200), and `after` is an
-// optional async function the route invokes AFTER sending `body` — that's where
-// all the follow-up REST work (DiscordRequest POST/PATCH) happens, so we never
-// block the initial response on a network call.
+// app.js is a thin shell: it logs the discord.js client in and hands every
+// `interactionCreate` event to `handleInteraction(interaction)`. Replies use the
+// interaction itself (`reply` / `update` / `deferUpdate`); everything the bot posts
+// on its own (lobby, later questions, completion) goes through the channel by id,
+// so timer callbacks can post/edit without an interaction in hand.
+//
+// Ordering rule: session state is mutated (answer recorded, timer cleared) BEFORE the
+// first `await`, so a double-click or a click racing a timeout can't double-advance.
 //
 // Message style: classic `{ content, components }` (string + action rows). The
-// ephemeral picker / confirm / party screens keep the EPHEMERAL flag; the public
-// lobby + question messages are plain channel messages posted with the bot token.
+// ephemeral picker / confirm / party screens are updated in place with
+// `interaction.update`; the public lobby + question messages are plain channel messages.
 //
-// Per-question rendering choice: question 0 is produced by PATCHing the public
+// Per-question rendering choice: question 0 is produced by editing the public
 // lobby message in place (`showQuestion`). Every subsequent question is posted as
 // a FRESH channel message (`postQuestion`) per the CONTEXT.md §0 step-14
 // recommendation ("a fresh message per question reads better"), updating
 // session.messageId to the new id each time. Answer results and timeouts always
-// PATCH whatever the current session.messageId is.
+// edit whatever the current session.messageId is.
 
 import {
-  InteractionType,
-  InteractionResponseType,
-  InteractionResponseFlags,
-  MessageComponentTypes,
-  ButtonStyleTypes,
-} from 'discord-interactions';
-import { DiscordRequest } from './utils.js';
+  ButtonStyle,
+  ComponentType,
+  MessageFlags,
+} from 'discord.js';
 import {
   cid,
   parseCustomId,
@@ -45,8 +42,8 @@ import {
 } from './state.js';
 import { getQuestion, checkAnswer, QUESTION_COUNT } from './trivia.js';
 
-const { BUTTON, ACTION_ROW } = MessageComponentTypes;
-const EPHEMERAL = InteractionResponseFlags.EPHEMERAL;
+const { Button: BUTTON, ActionRow: ACTION_ROW } = ComponentType;
+const EPHEMERAL = MessageFlags.Ephemeral;
 
 // How long a revealed answer/timeout stays on screen before the next question.
 const RESULT_READ_MS = 1500;
@@ -54,7 +51,8 @@ const RESULT_READ_MS = 1500;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // setTimeout wrapper that stores the handle on the session and unref()s it so a
-// pending game timer never keeps the process alive on its own (Express does).
+// pending game timer never holds the process open on its own (the gateway
+// connection does that), which keeps shutdown clean.
 function armTimer(sid, fn, ms) {
   const handle = setTimeout(fn, ms);
   if (handle && typeof handle.unref === 'function') handle.unref();
@@ -74,7 +72,7 @@ function row(...buttons) {
 function modePickerComponents(sid) {
   return row(
     ...MODES.map((m) =>
-      button(cid.modeSelect(m.key, sid), m.label, ButtonStyleTypes.SECONDARY, {
+      button(cid.modeSelect(m.key, sid), m.label, ButtonStyle.Secondary, {
         disabled: !m.enabled,
       }),
     ),
@@ -83,30 +81,30 @@ function modePickerComponents(sid) {
 
 function confirmComponents(sid) {
   return row(
-    button(cid.modeConfirm(sid), 'Confirm', ButtonStyleTypes.PRIMARY),
-    button(cid.modeBack(sid), 'Back', ButtonStyleTypes.SECONDARY),
+    button(cid.modeConfirm(sid), 'Confirm', ButtonStyle.Primary),
+    button(cid.modeBack(sid), 'Back', ButtonStyle.Secondary),
   );
 }
 
 function partyComponents(sid) {
   return row(
-    button(cid.soloSelect(sid), 'Solo', ButtonStyleTypes.PRIMARY),
-    button(cid.teamsSelect(sid), 'Teams', ButtonStyleTypes.SECONDARY),
-    button(cid.partyBack(sid), 'Back', ButtonStyleTypes.SECONDARY),
+    button(cid.soloSelect(sid), 'Solo', ButtonStyle.Primary),
+    button(cid.teamsSelect(sid), 'Teams', ButtonStyle.Secondary),
+    button(cid.partyBack(sid), 'Back', ButtonStyle.Secondary),
   );
 }
 
 function lobbyComponents(sid) {
   return row(
-    button(cid.lobbyStart(sid), 'Start Now', ButtonStyleTypes.SUCCESS),
-    button(cid.lobbyCancel(sid), 'Cancel', ButtonStyleTypes.DANGER),
+    button(cid.lobbyStart(sid), 'Start Now', ButtonStyle.Success),
+    button(cid.lobbyCancel(sid), 'Cancel', ButtonStyle.Danger),
   );
 }
 
 function answerComponents(sid, qIndex) {
   return row(
-    button(cid.answer(sid, qIndex, 'yes'), 'Yes', ButtonStyleTypes.PRIMARY),
-    button(cid.answer(sid, qIndex, 'no'), 'No', ButtonStyleTypes.SECONDARY),
+    button(cid.answer(sid, qIndex, 'yes'), 'Yes', ButtonStyle.Primary),
+    button(cid.answer(sid, qIndex, 'no'), 'No', ButtonStyle.Secondary),
   );
 }
 
@@ -115,130 +113,112 @@ function modeLabel(key) {
   return mode ? mode.label : key;
 }
 
+// --- channel helpers -------------------------------------------------------
+
+// Post / edit a public channel message by id, so timers can act with no interaction.
+async function sendMessage(client, channelId, payload) {
+  const channel = await client.channels.fetch(channelId);
+  return channel.send(payload);
+}
+
+async function editMessage(client, channelId, messageId, payload) {
+  const channel = await client.channels.fetch(channelId);
+  return channel.messages.edit(messageId, payload);
+}
+
 // --- response helpers ------------------------------------------------------
 
-function ephemeralUpdate(content, components) {
-  return {
-    body: {
-      type: InteractionResponseType.UPDATE_MESSAGE,
-      data: { flags: EPHEMERAL, content, components },
-    },
-  };
-}
+// Edit the ephemeral message the button lives on (stays ephemeral).
+const ephemeralUpdate = (interaction, content, components) =>
+  interaction.update({ content, components });
 
 // Bot was restarted (or session already ended) and getSession(sid) is undefined.
-function staleResponse() {
-  return {
-    body: {
-      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-      data: {
-        flags: EPHEMERAL,
-        content: 'That trivia session expired — run `/start` again.',
-      },
-    },
-  };
-}
-
-const deferredUpdate = () => ({
-  body: { type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE },
-});
+const staleResponse = (interaction) =>
+  interaction.reply({
+    flags: EPHEMERAL,
+    content: 'That trivia session expired — run `/start` again.',
+  });
 
 // --- game-loop helpers (also driven by the timers) ------------------------
 
 // CONTEXT.md §0 step 10 — also called by the lobby countdown timer.
-export async function startQuestions(sid) {
+export async function startQuestions(client, sid) {
   const session = getSession(sid);
   if (!session) return;
   updateSession(sid, { status: 'in_progress', questionIndex: 0 });
-  await showQuestion(sid, 0);
+  await showQuestion(client, sid, 0);
 }
 
-// CONTEXT.md §0 step 11 — PATCH the current message into question `qIndex`.
+// CONTEXT.md §0 step 11 — edit the current message into question `qIndex`.
 // Used for question 0 (turns the lobby message into the first question).
-export async function showQuestion(sid, qIndex) {
+export async function showQuestion(client, sid, qIndex) {
   const session = getSession(sid);
   if (!session) return;
   const q = getQuestion(qIndex);
   try {
-    await DiscordRequest(
-      `channels/${session.channelId}/messages/${session.messageId}`,
-      {
-        method: 'PATCH',
-        body: {
-          content: `**Q${qIndex + 1}/${QUESTION_COUNT}**: ${q.prompt}`,
-          components: answerComponents(sid, qIndex),
-        },
-      },
-    );
+    await editMessage(client, session.channelId, session.messageId, {
+      content: `**Q${qIndex + 1}/${QUESTION_COUNT}**: ${q.prompt}`,
+      components: answerComponents(sid, qIndex),
+    });
   } catch (err) {
-    console.error('showQuestion PATCH failed', err);
+    console.error('showQuestion edit failed', err);
   }
   armTimer(
     sid,
-    () => onQuestionTimeout(sid, qIndex).catch((e) => console.error(e)),
+    () => onQuestionTimeout(client, sid, qIndex).catch((e) => console.error(e)),
     QUESTION_TIMEOUT_MS,
   );
 }
 
-// POST a fresh channel message for question `qIndex` and re-point the session
+// Post a fresh channel message for question `qIndex` and re-point the session
 // at it. Used for every question after the first (CONTEXT.md §0 step 14).
-async function postQuestion(sid, qIndex) {
+async function postQuestion(client, sid, qIndex) {
   const session = getSession(sid);
   if (!session) return;
   const q = getQuestion(qIndex);
   try {
-    const res = await DiscordRequest(
-      `channels/${session.channelId}/messages`,
-      {
-        method: 'POST',
-        body: {
-          content: `**Q${qIndex + 1}/${QUESTION_COUNT}**: ${q.prompt}`,
-          components: answerComponents(sid, qIndex),
-        },
-      },
-    );
-    const msg = await res.json();
+    const msg = await sendMessage(client, session.channelId, {
+      content: `**Q${qIndex + 1}/${QUESTION_COUNT}**: ${q.prompt}`,
+      components: answerComponents(sid, qIndex),
+    });
     updateSession(sid, { messageId: msg.id });
   } catch (err) {
-    console.error('postQuestion POST failed', err);
+    console.error('postQuestion send failed', err);
   }
   armTimer(
     sid,
-    () => onQuestionTimeout(sid, qIndex).catch((e) => console.error(e)),
+    () => onQuestionTimeout(client, sid, qIndex).catch((e) => console.error(e)),
     QUESTION_TIMEOUT_MS,
   );
 }
 
 // CONTEXT.md §0 step 14 — move on, or finish and tear the session down.
-export async function advance(sid, nextIndex) {
+export async function advance(client, sid, nextIndex) {
   const session = getSession(sid);
   if (!session) return;
 
   if (nextIndex < QUESTION_COUNT) {
     updateSession(sid, { questionIndex: nextIndex });
     await sleep(RESULT_READ_MS); // let the previous result stay readable
-    await postQuestion(sid, nextIndex);
+    await postQuestion(client, sid, nextIndex);
     return;
   }
 
   updateSession(sid, { status: 'complete' });
   const correctCount = session.answers.filter((a) => a.correct).length;
   try {
-    await DiscordRequest(`channels/${session.channelId}/messages`, {
-      method: 'POST',
-      body: {
-        content: `🏁 Trivia complete! You got **${correctCount}/${QUESTION_COUNT}** correct.`,
-      },
+    await sendMessage(client, session.channelId, {
+      content: `🏁 Trivia complete! You got **${correctCount}/${QUESTION_COUNT}** correct.`,
     });
   } catch (err) {
-    console.error('completion POST failed', err);
+    console.error('completion send failed', err);
   }
   deleteSession(sid);
 }
 
 // CONTEXT.md §0 step 13 — fired by the per-question timer. Guarded so a late
 // click that already recorded an answer can't be double-processed.
-export async function onQuestionTimeout(sid, qIndex) {
+export async function onQuestionTimeout(client, sid, qIndex) {
   const session = getSession(sid);
   if (!session) return;
   if (
@@ -252,27 +232,21 @@ export async function onQuestionTimeout(sid, qIndex) {
   const q = getQuestion(qIndex);
   session.answers.push({ qIndex, value: null, correct: false, timedOut: true });
   try {
-    await DiscordRequest(
-      `channels/${session.channelId}/messages/${session.messageId}`,
-      {
-        method: 'PATCH',
-        body: {
-          content: `**Q${qIndex + 1}**: ${q.prompt}\n\n⏰ Time's up! The answer was **${q.answer}**.`,
-          components: [],
-        },
-      },
-    );
+    await editMessage(client, session.channelId, session.messageId, {
+      content: `**Q${qIndex + 1}**: ${q.prompt}\n\n⏰ Time's up! The answer was **${q.answer}**.`,
+      components: [],
+    });
   } catch (err) {
-    console.error('question timeout PATCH failed', err);
+    console.error('question timeout edit failed', err);
   }
-  await advance(sid, qIndex + 1);
+  await advance(client, sid, qIndex + 1);
 }
 
 // --- component handlers -------------------------------------------------
 
-function handleComponent(parsed, session, reqBody) {
+async function handleComponent(interaction, parsed, session) {
+  const { client } = interaction;
   const { kind, sid } = parsed;
-  const { data } = reqBody;
 
   switch (kind) {
     case 'modeSelect': {
@@ -281,22 +255,25 @@ function handleComponent(parsed, session, reqBody) {
         // Buttons for disabled modes are rendered disabled, so this is just a
         // defensive path: stay on the picker.
         return ephemeralUpdate(
+          interaction,
           "That mode isn't available yet.",
           modePickerComponents(sid),
         );
       }
       updateSession(sid, { mode: mode.key });
       return ephemeralUpdate(
+        interaction,
         `You've selected: **${mode.label}**`,
         confirmComponents(sid),
       );
     }
 
     case 'modeConfirm':
-      return ephemeralUpdate('Solo or teams?', partyComponents(sid));
+      return ephemeralUpdate(interaction, 'Solo or teams?', partyComponents(sid));
 
     case 'modeBack':
       return ephemeralUpdate(
+        interaction,
         'Which trivia game mode?',
         modePickerComponents(sid),
       );
@@ -304,82 +281,57 @@ function handleComponent(parsed, session, reqBody) {
     case 'teamsSelect':
       // Out of scope this sprint — the button works but does not advance.
       return ephemeralUpdate(
+        interaction,
         'Solo or teams?\n\nTeams mode is coming soon — pick Solo for now.',
         partyComponents(sid),
       );
 
     case 'partyBack':
       return ephemeralUpdate(
+        interaction,
         `You've selected: **${modeLabel(session.mode)}**`,
         confirmComponents(sid),
       );
 
     case 'soloSelect': {
       updateSession(sid, { party: 'solo', status: 'lobby' });
-      const channelId = session.channelId;
-      const token = reqBody.token;
-      const after = async () => {
-        const unix = Math.floor((Date.now() + LOBBY_COUNTDOWN_MS) / 1000);
-        try {
-          const res = await DiscordRequest(`channels/${channelId}/messages`, {
-            method: 'POST',
-            body: {
-              content: `**Are You Smarter Than a Fifth Grader** — starting <t:${unix}:R>`,
-              components: lobbyComponents(sid),
-            },
-          });
-          const msg = await res.json();
-          updateSession(sid, { messageId: msg.id, token });
-          armTimer(
-            sid,
-            () => startQuestions(sid).catch((e) => console.error(e)),
-            LOBBY_COUNTDOWN_MS,
-          );
-        } catch (err) {
-          console.error('soloSelect lobby POST failed', err);
-        }
-      };
-      return {
-        body: {
-          type: InteractionResponseType.UPDATE_MESSAGE,
-          data: { flags: EPHEMERAL, content: 'Lobby posted in the channel 👇', components: [] },
-        },
-        after,
-      };
+      await interaction.update({
+        content: 'Lobby posted in the channel 👇',
+        components: [],
+      });
+      const unix = Math.floor((Date.now() + LOBBY_COUNTDOWN_MS) / 1000);
+      try {
+        const msg = await sendMessage(client, session.channelId, {
+          content: `**Are You Smarter Than a Fifth Grader** — starting <t:${unix}:R>`,
+          components: lobbyComponents(sid),
+        });
+        updateSession(sid, { messageId: msg.id });
+        armTimer(
+          sid,
+          () => startQuestions(client, sid).catch((e) => console.error(e)),
+          LOBBY_COUNTDOWN_MS,
+        );
+      } catch (err) {
+        console.error('soloSelect lobby send failed', err);
+      }
+      return;
     }
 
     case 'lobbyStart': {
       // TODO: host-only? Anyone may Start Now for the MVP.
       clearTimer(sid);
-      return {
-        ...deferredUpdate(),
-        after: async () => {
-          await startQuestions(sid);
-        },
-      };
+      await interaction.deferUpdate();
+      await startQuestions(client, sid);
+      return;
     }
 
     case 'lobbyCancel': {
       // TODO: host-only? Anyone may Cancel for the MVP.
       clearTimer(sid);
-      const { channelId, messageId } = session;
       deleteSession(sid);
-      return {
-        ...deferredUpdate(),
-        after: async () => {
-          try {
-            await DiscordRequest(
-              `channels/${channelId}/messages/${messageId}`,
-              {
-                method: 'PATCH',
-                body: { content: 'Trivia cancelled.', components: [] },
-              },
-            );
-          } catch (err) {
-            console.error('lobbyCancel PATCH failed', err);
-          }
-        },
-      };
+      // The Cancel button lives on the public lobby message, so edit it in place.
+      await interaction.update({ content: 'Trivia cancelled.', components: [] });
+      return;
     }
 
     case 'answer': {
@@ -391,85 +343,63 @@ function handleComponent(parsed, session, reqBody) {
         session.answers.some((a) => a.qIndex === qIndex)
       ) {
         // Stale / duplicate click — silently acknowledge, change nothing.
-        return deferredUpdate();
+        await interaction.deferUpdate();
+        return;
       }
       clearTimer(sid);
       const q = getQuestion(qIndex);
       const correct = checkAnswer(q, value);
       session.answers.push({ qIndex, value, correct });
-      return {
-        ...deferredUpdate(),
-        after: async () => {
-          try {
-            await DiscordRequest(
-              `channels/${session.channelId}/messages/${session.messageId}`,
-              {
-                method: 'PATCH',
-                body: {
-                  content: `**Q${qIndex + 1}**: ${q.prompt}\n\nYou answered **${value}** — ${
-                    correct ? '✅ Correct!' : '❌ Incorrect.'
-                  }`,
-                  components: [],
-                },
-              },
-            );
-          } catch (err) {
-            console.error('answer PATCH failed', err);
-          }
-          await advance(sid, qIndex + 1);
-        },
-      };
+      // The Yes/No buttons live on the current question message, so edit it in place.
+      try {
+        await interaction.update({
+          content: `**Q${qIndex + 1}**: ${q.prompt}\n\nYou answered **${value}** — ${
+            correct ? '✅ Correct!' : '❌ Incorrect.'
+          }`,
+          components: [],
+        });
+      } catch (err) {
+        console.error('answer update failed', err);
+      }
+      await advance(client, sid, qIndex + 1);
+      return;
     }
 
     default:
-      console.error(`unknown component custom_id: ${data.custom_id}`);
-      return { status: 400, body: { error: 'unknown component' } };
+      console.error(`unknown component custom_id: ${interaction.customId}`);
   }
 }
 
 // --- entry point ---------------------------------------------------------
 
-export async function handleInteraction(reqBody) {
-  const { type, data } = reqBody;
-  const context = reqBody.context;
-  const userId =
-    context === 0 ? reqBody.member?.user?.id : reqBody.user?.id;
-
-  if (type === InteractionType.PING) {
-    return { body: { type: InteractionResponseType.PONG } };
-  }
-
-  if (type === InteractionType.APPLICATION_COMMAND) {
-    const { name } = data;
-    if (name === 'start') {
+export async function handleInteraction(interaction) {
+  if (interaction.isChatInputCommand()) {
+    if (interaction.commandName === 'start') {
       const session = createSession({
-        hostId: userId,
-        channelId: reqBody.channel_id || reqBody.channel?.id,
+        hostId: interaction.user.id,
+        channelId: interaction.channelId,
       });
-      return {
-        body: {
-          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-          data: {
-            flags: EPHEMERAL,
-            content: 'Which trivia game mode?',
-            components: modePickerComponents(session.sid),
-          },
-        },
-      };
+      await interaction.reply({
+        flags: EPHEMERAL,
+        content: 'Which trivia game mode?',
+        components: modePickerComponents(session.sid),
+      });
+      return;
     }
-    console.error(`unknown command: ${name}`);
-    return { status: 400, body: { error: 'unknown command' } };
+    console.error(`unknown command: ${interaction.commandName}`);
+    return;
   }
 
-  if (type === InteractionType.MESSAGE_COMPONENT) {
-    const parsed = parseCustomId(data.custom_id);
+  if (interaction.isButton()) {
+    const parsed = parseCustomId(interaction.customId);
     const session = parsed.sid ? getSession(parsed.sid) : undefined;
     if (parsed.kind !== 'unknown' && !session) {
-      return staleResponse();
+      await staleResponse(interaction);
+      return;
     }
-    return handleComponent(parsed, session, reqBody);
+    await handleComponent(interaction, parsed, session);
+    return;
   }
 
-  console.error('unknown interaction type', type);
-  return { status: 400, body: { error: 'unknown interaction type' } };
+  console.error('unhandled interaction type', interaction.type);
 }

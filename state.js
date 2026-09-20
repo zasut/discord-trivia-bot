@@ -2,8 +2,8 @@
 //
 // Session store keyed by `sid`. A session tracks everything the flow needs between
 // interactions: chosen mode, party type, players, question progress, and the
-// interaction token + message id used to PATCH/POST via DiscordRequest when a timer
-// fires (the bot is HTTP-interactions only, no gateway). See CONTEXT.md §0 / §6.
+// channel id + message id used to post/edit messages when a timer fires with no
+// interaction in hand. See CONTEXT.md §0 / §6.
 
 import { randomUUID } from 'node:crypto';
 
@@ -26,7 +26,6 @@ export function createSession({ hostId, channelId }) {
     status: 'picking', // 'picking' | 'lobby' | 'in_progress' | 'complete' | 'cancelled'
     questionIndex: 0,
     answers: [], // per-question answer records, shape decided by the game loop
-    token: null, // interaction token for follow-ups (valid ~15 min)
     messageId: null, // id of the public lobby / question message
     timer: null, // active setTimeout handle, if any
     createdAt: Date.now(),
