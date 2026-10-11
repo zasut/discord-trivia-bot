@@ -2,8 +2,8 @@
 // (DESIGN.md "Fifth Grader board"). Shared by solo and trivia night.
 //
 // A board is an array of tiles `{ index, grade, subject, state }`, state being
-// 'open' | 'right' | 'wrong' | 'skipped' (no question was left for it). Tiles are ordered
-// by grade, then subject.
+// 'open' | 'right' | 'wrong' (solo) | 'played' (trivia night) | 'skipped' (no question was
+// left for it). Tiles are ordered by grade, then subject.
 
 import { ButtonStyle, ComponentType } from 'discord.js';
 import { GRADES, TILES_PER_GRADE, cid } from './constants.js';
@@ -54,6 +54,8 @@ function tileButton(sid, tile, active) {
   if (tile.state === 'right') return { ...base, label: `✅ ${label}`, style: ButtonStyle.Success, disabled: true };
   if (tile.state === 'wrong') return { ...base, label: `❌ ${label}`, style: ButtonStyle.Danger, disabled: true };
   if (tile.state === 'skipped') return { ...base, label: `➖ ${label}`, style: ButtonStyle.Secondary, disabled: true };
+  // Trivia night: several teams answer a tile, so it is just "done", not right or wrong.
+  if (tile.state === 'played') return { ...base, label: `☑️ ${label}`, style: ButtonStyle.Secondary, disabled: true };
   const playable = tile.grade === active;
   return { ...base, label, style: playable ? ButtonStyle.Primary : ButtonStyle.Secondary, disabled: !playable };
 }

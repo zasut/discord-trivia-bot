@@ -20,6 +20,22 @@ describe('custom_id round trip', () => {
     ['typed', ['12']],
     ['typedSubmit', ['12']],
     ['cheat', ['12', 'peek']],
+    ['join', []],
+    ['leave', []],
+    ['makeTeams', []],
+    ['cancelNight', []],
+    ['teamCount', ['3']],
+    ['shuffle', []],
+    ['moveStart', []],
+    ['movePlayer', []],
+    ['moveTo', ['123456789012345678']],
+    ['builderBack', []],
+    ['startNight', []],
+    ['assist', ['4']],
+    ['assistPick', ['4']],
+    ['next', []],
+    ['anotherBoard', []],
+    ['endNight', []],
   ];
   for (const [kind, args] of cases) {
     test(kind, () => {
@@ -73,6 +89,12 @@ describe('building ids', () => {
   test('ids over the 100-character Discord limit are refused', () => {
     assert.throws(() => cid.pack(SID, 'x'.repeat(70)), /longer than 100/);
     assert.doesNotThrow(() => cid.pack(SID, 'x'.repeat(50)));
+  });
+
+  test('the longest ids fit, even with a 20-digit user id', () => {
+    assert.ok(cid.moveTo(SID, '9'.repeat(20)).length <= 100);
+    assert.ok(cid.ans(SID, 999, 3).length <= 100);
+    assert.ok(cid.cheat(SID, 999, 'peek').length <= 100);
   });
 
   test('answer buttons carry only numbers, never a choice letter', () => {

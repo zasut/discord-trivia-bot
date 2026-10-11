@@ -435,6 +435,7 @@ app.js           gateway shell: initDb(), seed samples if needed, log in, route 
 flow.js          handleInteraction router + /start setup screens
 solo.js          solo runs: board, questions, cheats, end of run
 night.js         trivia night: sign-up, team builder, rounds, reveal, end
+teams.js         trivia-night team rules: dealing, answer order, pick rotation, winners
 board.js         board building + rendering shared by solo and night
 ui.js            button / row / select / modal builders, question rendering
 messages.js      send / edit / delete public messages by channel id
@@ -598,13 +599,13 @@ Commit: `Add /stats command`
 
 ### Phase 5: Trivia night
 
-- [ ] Enable **Trivia night**: sign-up, team builder, answer order, tile-pick rotation,
+- [x] Enable **Trivia night**: sign-up, team builder, answer order, tile-pick rotation,
   simultaneous answering, Ask a teammate, reveal and host controls, more boards, scoring,
   wins and idle timers.
-- [ ] Record teams, game_players (with `turn_order`) and guesses (with `team_id` and
+- [x] Record teams, game_players (with `turn_order`) and guesses (with `team_id` and
   assist fields).
-- [ ] Add the trivia-night section to `/stats`.
-- [ ] Tests:
+- [x] Add the trivia-night section to `/stats`.
+- [x] Tests:
   - Unit tests for answer order, pick rotation and winners/ties.
   - Smoke test: 2 teams × 2 players play a full board, with an assist, a typed answer, a
     not-your-turn click, one team timing out, then Play another board and End night, and a
@@ -705,3 +706,48 @@ for every judgment call they make during implementation.
   never asked.
 - Phase 4: when the viewed player has no counted guesses, the reply is "No games yet. Run
   `/start`!" for yourself and "@name hasn't played yet." for someone else.
+- Phase 5: the sign-up starts empty (the host is not added automatically, since a host may
+  only be reading questions) and holds up to 25 players. **Make teams** needs at least 2.
+  The builder opens with 2 teams, and a team count is disabled if there are fewer players
+  than teams.
+- Phase 5: nothing is written to the database until **Start**, so a sign-up that is
+  cancelled, expires, or never gets teams leaves no rows. Start writes the game, teams and
+  players in one transaction.
+- Phase 5: Start refuses (privately, staying in the builder) if the question bank can't
+  build a first board; opening the sign-up checks the same thing.
+- Phase 5: a team's answer order is alphabetical with a locale-aware, case-insensitive
+  comparison, so "Émile" sorts between "Dan" and "Zed" rather than after "z". Ties go to the
+  lower user id. It is computed once, at Start.
+- Phase 5: every team's `turn` advances after every question, including when a team's turn
+  was handed to a teammate or timed out, so Ask a teammate never changes the order. The
+  team that picks the next tile is the next team in order, and its pick belongs to the
+  player who will also answer for it.
+- Phase 5: Ask a teammate is spent when the teammate is picked, not when they answer. The
+  original answerer can no longer answer. The guess is recorded under the helper with
+  `assisted = 1` and `assigned_user_id` set to the asker; if the helper times out, that
+  timeout is recorded the same way. The team's `assistUsed` is per night.
+- Phase 5: a team that times out is recorded as a timeout guess for whoever was its
+  designated answerer at that moment.
+- Phase 5: the status lines under a question are refreshed by editing the message by id,
+  not by the answering interaction (that one is used for the private lock-in). A refresh
+  that arrives after the question has ended is dropped, so it can never overwrite the result.
+- Phase 5: the private lock-in names the option as displayed ("🔒 Locked in: B) Venus"), not
+  just the letter.
+- Phase 5: a tile on a night is shown as `played` (☑️) once picked, not right or wrong,
+  since several teams answered it.
+- Phase 5: team scores are saved after every question; `won` is only set when the night
+  ends. A night that ends with nobody having scored has no winner (it is not a 0-0 tie for
+  everyone). `quit` (ended before any question) and `abandoned` (idle) nights record no
+  wins.
+- Phase 5: a night counts as "played" in `/stats` only if the player was on a team and at
+  least one question was asked. "Answered" counts the guesses the player made themselves,
+  including as the helper; "assists given" counts the times they were the helper.
+- Phase 5: `/stats` for a player who was on a night but never got a turn shows "no answers
+  yet" for Overall and still lists the night.
+- Phase 5: if a tile has no unused question when it is picked on a night (an import
+  deactivated them mid-game) it becomes `skipped`, as in solo. If that was the last tile,
+  the host gets the board-finished buttons.
+- Phase 5: the host-only buttons are enforced in `handleNight` (`HOST_ONLY`), so players get
+  "Only the host can do that." rather than a silent no-op.
+- Phase 5: the host may pick a tile for any team at any time, as in the design, and the
+  host may also be a player.

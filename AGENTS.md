@@ -9,11 +9,12 @@ plan are in [DESIGN.md](DESIGN.md).
 
 A Discord trivia bot built on **discord.js v14** as a **gateway bot**. It keeps a websocket
 open to Discord, so there is no HTTP server, tunnel or public URL. The playable game is
-**"Are You Smarter Than a Fifth Grader"**, solo: `/start` takes the player through a private
-(ephemeral) setup, then posts a public board of grade + subject tiles. They climb from
-1st to 5th grade, answering multiple-choice or typed questions against a timer. Every game
-and guess is saved to a local SQLite database. Trivia night (teams) is designed but not
-built yet; see Roadmap.
+**"Are You Smarter Than a Fifth Grader"**, in two formats: `/start` takes the user through a
+private (ephemeral) setup, then either a **solo** run (a public board of grade + subject
+tiles climbed from 1st to 5th grade against a timer) or a **trivia night** (a host signs up
+players, splits them into teams, and the teams answer the same questions together). Both
+answer with multiple choice or typed text. Every game and guess is saved to a local SQLite
+database.
 
 - Node.js ≥ 22.13 (for the built-in `node:sqlite`), ES modules (`"type": "module"`), plain
   JavaScript.
@@ -70,10 +71,12 @@ script, point it at a scratch file and set `TRIVIA_DB_PATH` to a scratch databas
 | File | Role |
 |---|---|
 | `app.js` | Thin shell. Opens the database (seeding the sample questions if it is empty), creates the discord.js `Client` (intent `Guilds` only), logs in and forwards every `InteractionCreate` to `handleInteraction`. If a handler throws, it sends the user an ephemeral error notice. |
-| `flow.js` | `handleInteraction`, the single router for commands, buttons and modal submits, plus the ephemeral `/start` setup screens and the `/stats` command. |
+| `flow.js` | `handleInteraction`, the single router for commands, buttons, select menus and modal submits, plus the ephemeral `/start` setup screens and the `/stats` command. |
 | `solo.js` | Solo runs: the board, questions, answers, lives, timers and the end-of-run summary. |
+| `night.js` | Trivia night: sign-up, the team builder, the board, simultaneous questions, Ask a teammate, results, host controls and the final standings. |
+| `teams.js` | Trivia-night team rules: `dealTeams`, `answerOrder`, `currentAnswerer`, `nextPickIndex`, `winningTeams`, `teamLabel`. Pure apart from the rng. |
 | `board.js` | Building the Fifth Grader board from the question bank, the climb rule, and rendering it as button rows. |
-| `ui.js` | Payload builders: `button`, `row`, question / result text, the answer modal, `publicPayload`, `displayName`. Pure. |
+| `ui.js` | Payload builders: `button`, `row`, `selectRow`, question / result text, the answer modal, `publicPayload`, `displayName`. Pure. |
 | `messages.js` | `sendMessage` / `editMessage` / `deleteMessage` by channel id. Mentions never ping. |
 | `answers.js` | Typed-answer normalisation and checking. Pure. |
 | `cheats.js` | The solo cheats: the cheat list, `cheatAvailability` (which are usable), `pickStruck` (50/50) and `peekText`. Pure apart from the rng. |
@@ -125,8 +128,9 @@ DESIGN.md "Database"; the schema itself is the `MIGRATIONS` array in `db.js`.
 ## Interaction flow
 
 **Setup** (ephemeral, `flow.js`): `/start` → pick a pack → **Confirm** / **Back** →
-**Solo** / *Trivia night (disabled)* / **Back** → pick **Hard** / **Standard** / **Casual**
-(each with a one-line description) / **Back**. Each screen is the same ephemeral message
+**Solo** / **Trivia night** / **Back**. Solo continues to a difficulty screen (**Hard** /
+**Standard** / **Casual**, each with a one-line description, and **Back**). Trivia night
+posts the sign-up (see Trivia night below). Each screen is the same ephemeral message
 edited with `interaction.update`. An unfinished setup is dropped after `SETUP_IDLE_MS`.
 
 **Starting a run** (`solo.startSolo`): checks the channel has no other public game, builds
@@ -171,6 +175,51 @@ are drawn disabled. Every use is recorded in `cheat_uses` against the question i
 | **50/50** | Strikes wrong choices until two remain (`q.struck`, shown as ~~text~~ with disabled buttons). | choice question with 3+ choices |
 | **Swap** | Replaces the question in the same message: the old game question is marked `swapped` (no guess), the new one gets the next `seq` and a fresh timer. | another unused question exists for the tile |
 | **Extra time** | Adds one base timer to the deadline and re-arms the timer. | always |
+
+### Trivia night
+
+The host picks **Trivia night** in setup; the session's `format` becomes `'night'` and
+`night.js` takes over. Nothing is written to the database until **Start**, so an unstarted
+night leaves no rows. The host does not have to play. The `session.status` path is
+`signup → building → board → question → reveal → board …`, ending in `ending → ended`.
+
+1. **Sign-up** (public message): **Join** / **Leave** (anyone, up to `MAX_NIGHT_PLAYERS`),
+   and host-only **Make teams** (needs 2+ players) / **Cancel**. Others pressing a host
+   button get an ephemeral "Only the host can do that." A `SIGNUP_IDLE_MS` timer expires it.
+2. **Team builder** (the host's private message): **Make teams** closes sign-up (the public
+   message loses its buttons) and opens the builder: 2 / 3 / 4 teams (🟥 Red, 🟦 Blue,
+   🟩 Green, 🟨 Yellow; counts above the player count are disabled), dealt round-robin from
+   a shuffle. **Shuffle** re-deals; **Move a player** shows a player select, then a team
+   select; **Back** reopens sign-up; **Start** needs every team non-empty.
+3. **Start** records the game, teams and `game_players` (with `turn_order`) in one
+   transaction, edits the sign-up message to list the teams, and posts board 1. A team's
+   **answer order** is alphabetical by name (`answerOrder`), fixed here.
+4. **Board:** like solo's, but the control button is **End night** and tiles are marked
+   `played` (☑️) rather than right/wrong. Tile picking rotates through the teams in order,
+   continuing across boards (`night.pickIndex`). The picking team's current answerer, or the
+   host, may pick; anyone else gets "It's @X's (🟥 Red) pick."
+5. **Question** (fresh message, board deleted): the same question for every team at once,
+   with a status line per team (`🟥 Red: @Ann ⏳` → `🔒`) and a **🙋 Ask a teammate** row.
+   Only each team's current answerer can answer, once. They get a private "🔒 Locked in",
+   and the public status line is refreshed by channel edit (`refreshQuestion`, which skips
+   if the question already ended). Other clicks get an ephemeral reason. The question ends
+   when every team has locked in, or `TIMERS.night` runs out (unlocked teams get a timeout
+   guess).
+6. **Ask a teammate:** the answerer picks a teammate from a private select
+   (`assistPick`); that teammate answers this question instead (`slot.forId` /
+   `slot.answererId`), once per team per night (`team.assistUsed`, set when picked). The
+   guess is recorded under the teammate with `assisted = 1` and `assigned_user_id` = the
+   asker. The answer order is not affected.
+7. **Result:** `closeIfDone` does the bookkeeping synchronously (scores, every team's
+   `turn++`, `pickIndex` advance, `night.reveal`, scores saved), then `revealQuestion` edits
+   the message to show the answer, each team's answer with ✅/❌/⏰ and the scores, with
+   host-only **Next ▶** (or **Play another board** after the last tile, disabled if there
+   aren't enough unused questions) and **End night**. A `NIGHT_IDLE_MS` timer abandons an
+   untouched night.
+8. **End** (`finishNight`): status `completed` (or `quit` if no question was asked, or
+   `abandoned` on idle). The highest-scoring team or teams win (ties share; if nobody scored
+   nobody wins; abandoned and quit nights record no wins). `teams.score` / `won` are saved
+   and the standings posted.
 
 A button whose `sid` has no live session (bot restarted, game over, setup timed out) gets an
 ephemeral *"That trivia session expired — run `/start` again."* (a modal submit gets
@@ -231,6 +280,18 @@ state a button carries. Build ids only with `cid.*` and parse them only with
 | `typed` | `seq` | opens the answer modal |
 | `typedSubmit` | `seq` | the modal's own id |
 | `cheat` | `seq`, `peek` / `fifty` / `swap` / `time` | cheat row on a solo question |
+| `join`, `leave` | — | night sign-up |
+| `makeTeams`, `cancelNight` | — | night sign-up (host only) |
+| `teamCount` | `2` / `3` / `4` | team builder (host only) |
+| `shuffle`, `moveStart`, `builderBack`, `startNight` | — | team builder (host only) |
+| `movePlayer` | — | team builder: player select (the chosen user id is the select's value) |
+| `moveTo` | user id | team builder: team select (the chosen team index is the select's value) |
+| `assist` | `seq` | night question: Ask a teammate |
+| `assistPick` | `seq` | night: teammate select (the chosen user id is the select's value) |
+| `next`, `anotherBoard`, `endNight` | — | night result / board (host only) |
+
+`tile`, `ans`, `typed` and `typedSubmit` are shared: `flow.js` routes them to `solo.js` or
+`night.js` by `session.format`.
 
 - `sid` is `crypto.randomUUID()` with the dashes stripped: exactly 32 hex characters.
   Kinds and args must not contain `:` (`cid.*` throws if they do) and an id must fit
@@ -241,13 +302,15 @@ state a button carries. Build ids only with `cid.*` and parse them only with
   keeps `q.order` (position → index into `question.choices`) to translate. Tiles are
   referenced by index, never by subject text.
 
-**Adding a button:** add a builder to `cid`, a `case` in `handleSolo` (or `handleSetup`) and
-`SETUP_KINDS` if it is a setup button, a row in the table above, a test in
-`test/constants.test.js` and a step in `scripts/smoke.js`.
+**Adding a button:** add a builder to `cid`, a `case` in `handleSolo` / `handleNight` (or
+`handleSetup`, and `SETUP_KINDS`, for a setup button; and `HOST_ONLY` in `night.js` for a
+host-only night button), a row in the table above, a test in `test/constants.test.js` and a
+step in `scripts/smoke.js`.
 
 ## Sessions and timers
 
-Created by `createSession` in `state.js`, then extended by `solo.startSolo`:
+Created by `createSession` in `state.js`, then extended by `solo.startSolo` (solo) or
+`night.openSignup` (trivia night). Solo:
 
 ```js
 {
@@ -280,6 +343,31 @@ Created by `createSession` in `state.js`, then extended by `solo.startSolo`:
 }
 ```
 
+Trivia night (`session.night`; `format: 'night'`, `status` `'signup' | 'building' | 'board' |
+'question' | 'reveal' | 'ending' | 'ended'`, and `hostId` is the host, who may not be a player):
+
+```js
+night: {
+  roster,        // Map userId -> display name, during sign-up
+  builder,       // { teamCount, teams: [[userId]], moving } while building, else null
+  teams: [{ index, id, name, members, turn, score, assistUsed }],
+                 // members is the fixed answer order; turn counts questions asked;
+                 // id is teams.id
+  teamOf,        // Map userId -> team index; names  Map userId -> display name
+  pickIndex,     // the team that picks the next tile
+  boardNumber, tiles, usedIds, seq, asked,
+  q: {           // the question on screen (or the last one)
+    seq, gameQuestionId, tileIndex, question, order, shownAtMs, deadlineMs,
+    closed,      // true once the question has ended
+    slots: [{    // one per team, in team order
+      answererId, forId,  // who answers; forId is who asked for help, else null
+      locked, given, correct, timedOut,
+    }],
+  },
+  reveal,        // { cleared, canAnother } once a question has ended, for the host's buttons
+}
+```
+
 - **All state is in memory.** A restart drops every session. At startup `initDb` marks the
   games that were running as `abandoned`.
 - **One public game per channel**, enforced with `findPublicSession(channelId)` at the
@@ -294,7 +382,10 @@ Created by `createSession` in `state.js`, then extended by `solo.startSolo`:
   Answering and `onQuestionTimeout` both go through `openQuestion(session, seq)`, which
   requires `status === 'question'`, the current `seq` and `!q.answered`, and `settle()`
   sets `q.answered` and records the guess synchronously. Stale or duplicate clicks get a
-  `deferUpdate` and change nothing. Any new timed step needs the same guards.
+  `deferUpdate` and change nothing. Any new timed step needs the same guards. On a night,
+  `openQuestion(session, seq)` requires `status === 'question'`, the current `seq` and
+  `!q.closed`; `lockSlot` records a team's answer and `closeIfDone` closes the question and
+  does all its bookkeeping, both synchronously, before any acknowledgement is awaited.
 - After any `await` that sends a message, re-check the session is still the live one before
   touching it (see `postQuestion`).
 - Channel send / edit / delete failures are caught and logged so the game loop keeps going.
@@ -316,22 +407,25 @@ Created by `createSession` in `state.js`, then extended by `solo.startSolo`:
 | Tunable | Where | Value |
 |---|---|---|
 | `TIMERS.solo.choice` / `.typed` | `constants.js` | 20 s / 45 s answer window |
+| `TIMERS.night.choice` / `.typed` | `constants.js` | 30 s / 60 s (the host reads the question aloud) |
 | `STANDARD_LIVES` | `constants.js` | 3 |
 | `PEEK_MIN_ANSWERS` | `constants.js` | 5: counted answers needed before Peek is offered |
 | `SETUP_IDLE_MS` | `constants.js` | 15 min: drop an unfinished setup |
-| `BOARD_IDLE_MS` | `constants.js` | 5 min: untouched board → abandoned |
-| `timing.resultReadMs` | `constants.js` | 1500: pause after a result (tests set it to 0) |
+| `BOARD_IDLE_MS` | `constants.js` | 5 min: untouched solo board → abandoned |
+| `SIGNUP_IDLE_MS` | `constants.js` | 30 min: a sign-up (or team builder) nobody finishes expires |
+| `NIGHT_IDLE_MS` | `constants.js` | 30 min: a night with nothing pressed between questions → abandoned |
+| `MAX_NIGHT_PLAYERS`, `MIN_TEAMS`, `MAX_TEAMS`, `TEAM_STYLES` | `constants.js` | 25 players, 2–4 teams, their names and colours |
+| `timing.resultReadMs` | `constants.js` | 1500: pause after a solo result (tests set it to 0) |
 | `DIFFICULTIES`, `PACKS` | `constants.js` | the difficulties and packs |
 
-`constants.js` also defines the later phases' tunables (`TIMERS.night`, `SIGNUP_IDLE_MS`,
-`NIGHT_IDLE_MS`, `LEADERBOARD_MIN_ANSWERS`), which nothing uses yet.
+`constants.js` also defines `LEADERBOARD_MIN_ANSWERS`, which nothing uses yet.
 
 ## Slash commands
 
 | Command | What it does |
 |---|---|
 | `/start` | Opens the ephemeral setup; see Interaction flow. |
-| `/stats [user] [share]` | A player's stats (default: you) from their counted guesses: overall, by grade, by subject (top 10), Standard and Hard runs. Private unless `share` is true. A player with no counted guesses gets "No games yet. Run `/start`!" (or "@name hasn't played yet."). |
+| `/stats [user] [share]` | A player's stats (default: you) from their counted guesses: overall, by grade, by subject (top 10), Standard and Hard runs, and trivia nights (played, team wins, answered, assists). Private unless `share` is true. A player with no counted guesses and no nights gets "No games yet. Run `/start`!" (or "@name hasn't played yet."). |
 
 Both are defined in `commands.js` with `type: 1`, `integration_types: [0]` and
 `contexts: [0]` (servers only, because games are posted by the bot into a channel).
@@ -343,10 +437,11 @@ a few minutes to appear.
 
 ## Known gaps
 
-- **Trivia night is not implemented** (Phase 5): its setup button is disabled.
-- **No `/leaderboard`** yet (Phase 6), and `/stats` has no trivia-night section (Phase 5).
-- Quit only exists on the board, so a player in the middle of a question can't quit until it
-  is answered or times out.
+- **No `/leaderboard`** yet (Phase 6).
+- Solo's Quit only exists on the board, so a player in the middle of a question can't quit
+  until it is answered or times out. The same goes for a night's **End night**.
+- A trivia night's teams are fixed at Start: nobody can join late, leave, or switch teams,
+  and the host can't be handed over. A player who walks away just times out on their turns.
 - A restart abandons games in progress. Their messages stay in the channel with dead
   buttons, which answer with the "expired" reply.
 - If the bank changes under a running game (an import deactivates a tile's questions), that
@@ -363,5 +458,6 @@ and record any judgment call in its Decisions log. The phases, in order:
 2. **Solo board game** — done.
 3. **Cheats** (Peek, 50/50, Swap, Extra time) — done.
 4. **Stats:** `/stats` — done.
+5. **Trivia night** (sign-up, teams, rotating answerers, Ask a teammate, host controls) — done.
 5. **Trivia night:** sign-up, teams, rotating answerers, Ask a teammate, host controls.
 6. **Leaderboard and analysis:** `/leaderboard` and saved SQL queries.

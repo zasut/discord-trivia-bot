@@ -8,6 +8,7 @@
 import { ButtonStyle, MessageFlags } from 'discord.js';
 import { DIFFICULTIES, PACKS, SETUP_IDLE_MS, cid, parseCustomId } from './constants.js';
 import { armTimer, createSession, deleteSession, getSession } from './state.js';
+import { handleNight, openSignup } from './night.js';
 import { handleSolo, startSolo } from './solo.js';
 import { formatStats, getPlayerStats } from './stats.js';
 import { NO_PINGS, button, mention, row } from './ui.js';
@@ -36,7 +37,7 @@ const confirmScreen = (sid) => [
 const formatScreen = (sid) => [
   row(
     button(cid.fmtSolo(sid), 'Solo', ButtonStyle.Primary),
-    button(cid.fmtNight(sid), 'Trivia night (coming soon)', ButtonStyle.Secondary, { disabled: true }),
+    button(cid.fmtNight(sid), 'Trivia night', ButtonStyle.Primary),
     button(cid.fmtBack(sid), 'Back', ButtonStyle.Secondary),
   ),
 ];
@@ -86,8 +87,7 @@ async function handleSetup(interaction, parsed, session) {
     case 'fmtSolo':
       return showScreen(interaction, DIFFICULTY_TEXT, difficultyScreen(sid));
     case 'fmtNight':
-      // The button is rendered disabled until trivia night exists.
-      return showScreen(interaction, `${FORMAT_TEXT}\n\nTrivia night is coming soon. Pick Solo for now.`, formatScreen(sid));
+      return openSignup(interaction, session);
     case 'fmtBack':
       return showScreen(interaction, packSelectedText(session.pack), confirmScreen(sid));
     case 'diffBack':
@@ -171,6 +171,7 @@ async function handleComponent(interaction) {
 
   if (SETUP_KINDS.has(parsed.kind)) return handleSetup(interaction, parsed, session);
   if (session.format === 'solo') return handleSolo(interaction, parsed, session);
+  if (session.format === 'night') return handleNight(interaction, parsed, session);
   return staleResponse(interaction);
 }
 
@@ -178,6 +179,8 @@ async function handleComponent(interaction) {
 
 export async function handleInteraction(interaction) {
   if (interaction.isChatInputCommand()) return handleCommand(interaction);
-  if (interaction.isButton() || interaction.isModalSubmit()) return handleComponent(interaction);
+  if (interaction.isButton() || interaction.isModalSubmit() || interaction.isStringSelectMenu()) {
+    return handleComponent(interaction);
+  }
   console.error('unhandled interaction type', interaction.type);
 }

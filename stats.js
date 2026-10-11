@@ -58,7 +58,10 @@ const percent = (correct, answered) => (answered > 0 ? Math.round((100 * correct
 //   bySubject the most-answered subjects, [{ subject, answered, correct, percent }]
 //   solo      { standard, hard } each { runs, cleared, best }, and avgCorrectPerRun
 //             (null with no runs)
-// `hasData` is false when the player has no counted guesses at all.
+//   nights    null if they haven't played a trivia night, else { played, wins, answered,
+//             correct, percent, assists }: nights played, team wins, the questions they
+//             answered themselves, and how often they were the teammate asked to help
+// `hasData` is false when the player has no counted guesses and hasn't played a night.
 export function getPlayerStats(userId) {
   const db = getDb();
   const counted = `FROM guesses g
@@ -121,8 +124,40 @@ export function getPlayerStats(userId) {
     };
   };
 
+  // Trivia nights the player was on a team for, where at least one question was asked.
+  const nightRow = db
+    .prepare(
+      `SELECT COUNT(*) AS played, COALESCE(SUM(t.won), 0) AS wins
+         FROM game_players gp
+         JOIN games gm ON gm.id = gp.game_id
+         LEFT JOIN teams t ON t.id = gp.team_id
+        WHERE gp.user_id = ? AND gm.format = 'night'
+          AND EXISTS (SELECT 1 FROM game_questions gq WHERE gq.game_id = gm.id)`,
+    )
+    .get(userId);
+  // What they answered themselves: as their team's answerer, or as the teammate asked to help.
+  const nightGuesses = db
+    .prepare(
+      `SELECT COUNT(*) AS answered, COALESCE(SUM(g.correct), 0) AS correct, COALESCE(SUM(g.assisted), 0) AS assists
+         FROM guesses g
+         JOIN games gm ON gm.id = g.game_id
+        WHERE g.user_id = ? AND gm.format = 'night'`,
+    )
+    .get(userId);
+  const nights =
+    nightRow.played > 0
+      ? {
+          played: nightRow.played,
+          wins: nightRow.wins,
+          answered: nightGuesses.answered,
+          correct: nightGuesses.correct,
+          percent: percent(nightGuesses.correct, nightGuesses.answered),
+          assists: nightGuesses.assists,
+        }
+      : null;
+
   return {
-    hasData: overall.answered > 0,
+    hasData: overall.answered > 0 || nights !== null,
     overall,
     byGrade,
     bySubject,
@@ -131,6 +166,7 @@ export function getPlayerStats(userId) {
       hard: summarize('hard'),
       avgCorrectPerRun: runs.length > 0 ? runs.reduce((sum, run) => sum + run.correct, 0) / runs.length : null,
     },
+    nights,
   };
 }
 
@@ -139,12 +175,16 @@ const oneDecimal = (n) => String(Math.round(n * 10) / 10);
 
 // The /stats text. Always under Discord's 2000-character limit.
 export function formatStats(stats, userId) {
-  const { overall, byGrade, bySubject, solo } = stats;
+  const { overall, byGrade, bySubject, solo, nights } = stats;
   const lines = [`📊 **Stats for ${mention(userId)}**`];
 
-  const answered = [`${overall.answered} answered`, `${overall.correct} correct (${overall.percent}%)`];
-  if (overall.avgMs !== null) answered.push(`avg ${oneDecimal(overall.avgMs / 1000)}s`);
-  lines.push(`**Overall:** ${answered.join(' · ')}`);
+  if (overall.answered > 0) {
+    const answered = [`${overall.answered} answered`, `${overall.correct} correct (${overall.percent}%)`];
+    if (overall.avgMs !== null) answered.push(`avg ${oneDecimal(overall.avgMs / 1000)}s`);
+    lines.push(`**Overall:** ${answered.join(' · ')}`);
+  } else {
+    lines.push('**Overall:** no answers yet');
+  }
 
   lines.push(
     `**By grade:** ${byGrade.map((g) => `${ordinal(g.grade)} ${g.percent === null ? '–' : `${g.percent}%`}`).join(' · ')}`,
@@ -167,6 +207,12 @@ export function formatStats(stats, userId) {
   }
   if (solo.avgCorrectPerRun !== null) {
     lines.push(`**Average correct per run:** ${oneDecimal(solo.avgCorrectPerRun)}`);
+  }
+  if (nights) {
+    const parts = [`${nights.played} played`, `${nights.wins} ${nights.wins === 1 ? 'team win' : 'team wins'}`];
+    if (nights.answered > 0) parts.push(`${nights.answered} answered (${nights.percent}% correct)`);
+    parts.push(`${nights.assists} ${nights.assists === 1 ? 'assist' : 'assists'} given`);
+    lines.push(`**Trivia nights:** ${parts.join(' · ')}`);
   }
   return clamp(lines.join('\n'));
 }

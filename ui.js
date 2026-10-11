@@ -34,6 +34,18 @@ export function row(...components) {
   return { type: ComponentType.ActionRow, components };
 }
 
+// A row holding one select menu. `options` is [{ label, value, description? }].
+export function selectRow(customId, placeholder, options) {
+  return row({
+    type: ComponentType.StringSelect,
+    custom_id: customId,
+    placeholder,
+    min_values: 1,
+    max_values: 1,
+    options,
+  });
+}
+
 // A payload for a public (non-ephemeral) message: clamped, and never pings anyone.
 export function publicPayload(content, components = []) {
   return { content: clamp(content), components, allowedMentions: NO_PINGS };

@@ -1,9 +1,10 @@
 # Discord Trivia Bot
 
-A Discord bot for running trivia in a server. Right now you can play **Are You Smarter Than a
-Fifth Grader** solo: `/start` opens a board of grade + subject tiles, you climb from 1st to
-5th grade answering timed questions, and every game and guess is saved so stats can be built
-on top. Trivia nights with teams are designed (see [DESIGN.md](DESIGN.md)) but not built yet.
+A Discord bot for running trivia in a server. You can play **Are You Smarter Than a Fifth
+Grader** two ways: **solo**, climbing a board of grade + subject tiles from 1st to 5th grade
+against a timer, or as a **trivia night**, where a host splits a group into teams that answer
+the same questions together. Every game and guess is saved so you can look at stats (and dig
+into the raw data) afterwards.
 
 This is a **gateway** bot built on [discord.js](https://discord.js.org/). It connects out to
 Discord over a websocket, so it shows as online in the member list and there is no public
@@ -152,6 +153,36 @@ Then type `/start` in a channel the bot can see.
 
 Timings and difficulties live in `constants.js`.
 
+## How a trivia night works
+
+A host runs the night for a group, usually with everyone in a voice call while the host reads
+the questions aloud (the bot posts them too).
+
+1. `/start` → pick the game → **Confirm** → **Trivia night**. The bot posts a sign-up in the
+   channel. Players press **Join** (up to 25; **Leave** if you change your mind). The host
+   doesn't have to play.
+2. The host presses **Make teams**. A private team builder appears for the host only:
+   - pick **2, 3 or 4 teams** (🟥 Red, 🟦 Blue, 🟩 Green, 🟨 Yellow); players are dealt out at
+     random,
+   - **Shuffle** to deal again, or **Move a player** to put someone on a different team,
+   - **Back** reopens sign-up if someone's missing, and **Start** begins the night.
+3. A **board** appears, like in solo. Teams take turns choosing the tile: the picking team's
+   current answerer chooses (the host can choose for them if they're away).
+4. The question appears **for every team at once**. Each team has one **answerer** at a time,
+   going through the team in alphabetical order, one question each. Only they can answer,
+   and they do it privately (you see "🔒 Locked in", everyone else only sees that your team
+   has answered). Teammates don't get a say.
+5. Each team can use **🙋 Ask a teammate** once per night: the answerer picks a teammate who
+   answers that one question instead.
+6. When every team has answered (or time runs out; a team that didn't answer gets nothing),
+   the bot shows the answer, what each team said, and the scores. The host presses **Next ▶**
+   for the next tile, or **Play another board** once a board is finished.
+7. The host presses **End night** to finish. The team with the most correct answers wins
+   (ties share the win).
+
+Every answer counts toward each player's own stats, and trivia nights also get their own
+section in `/stats` (nights played, team wins and so on).
+
 ## Stats
 
 Every guess is saved, so there is a lot to look at. `/stats` shows a player's numbers:
@@ -159,7 +190,8 @@ Every guess is saved, so there is a lot to look at. `/stats` shows a player's nu
 - `/stats` shows your own, privately. `/stats user:@someone` shows theirs.
   `/stats share:true` posts it in the channel instead.
 - It covers questions answered, % correct and average answer time overall, by grade and by
-  subject, plus your Standard and Hard runs (how many, how many you cleared, your best).
+  subject, plus your Standard and Hard runs (how many, how many you cleared, your best) and
+  your trivia nights.
 - **Casual games don't count**, and a timeout counts as a wrong answer.
 
 If you updated from an earlier version, run `npm run register` again so Discord learns about
@@ -172,6 +204,7 @@ If you updated from an earlier version, run `npm run register` again so Discord 
 | `app.js` | Opens the database, creates the discord.js client, logs in to the gateway, and hands every interaction to `flow.js`. |
 | `flow.js` | Routes every command, button and pop-up, and runs the private `/start` setup screens. |
 | `solo.js` | A solo game: the board, questions, answers, lives, timers and the summary. |
+| `night.js`, `teams.js` | A trivia night: sign-up, team builder, rounds, results; and the team rules (dealing, answer order, winners). |
 | `board.js` | Builds the grade + subject board and draws it as buttons. |
 | `ui.js`, `messages.js` | Build the message text and buttons, and send / edit / delete messages in the channel. |
 | `answers.js` | Checks typed answers (ignoring case and punctuation, comparing numbers as numbers). |

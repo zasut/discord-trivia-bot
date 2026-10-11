@@ -45,6 +45,19 @@ export const DIFFICULTIES = {
   },
 };
 
+// --- Trivia night ------------------------------------------------------------------------
+// Teams are named and coloured in this order; a night has 2 to 4 of them.
+export const TEAM_STYLES = [
+  { name: 'Red', emoji: '🟥' },
+  { name: 'Blue', emoji: '🟦' },
+  { name: 'Green', emoji: '🟩' },
+  { name: 'Yellow', emoji: '🟨' },
+];
+export const MIN_TEAMS = 2;
+export const MAX_TEAMS = TEAM_STYLES.length;
+// A select menu holds 25 options, and the team builder lists every player in one.
+export const MAX_NIGHT_PLAYERS = 25;
+
 // --- Tunables --------------------------------------------------------------------------
 // Answer windows in ms, by game format and question type.
 export const TIMERS = {
@@ -106,6 +119,25 @@ export const cid = {
   typed: id('typed'), //        (sid, seq): opens the answer modal
   typedSubmit: id('typedSubmit'), // (sid, seq): the modal's own id
   cheat: id('cheat'), //        (sid, seq, 'peek' | 'fifty' | 'swap' | 'time')
+  // trivia night: sign-up (public)
+  join: id('join'),
+  leave: id('leave'),
+  makeTeams: id('makeTeams'), // host only
+  cancelNight: id('cancelNight'), // host only
+  // trivia night: team builder (the host's ephemeral message)
+  teamCount: id('teamCount'), //   (sid, 2 | 3 | 4)
+  shuffle: id('shuffle'),
+  moveStart: id('moveStart'),
+  movePlayer: id('movePlayer'), // select menu: pick the player to move
+  moveTo: id('moveTo'), //         (sid, userId): select menu: pick the team
+  builderBack: id('builderBack'),
+  startNight: id('startNight'),
+  // trivia night: playing (public)
+  assist: id('assist'), //         (sid, seq): "Ask a teammate"
+  assistPick: id('assistPick'), // (sid, seq): select menu: pick the teammate
+  next: id('next'), //             host only: the next board after a result
+  anotherBoard: id('anotherBoard'), // host only
+  endNight: id('endNight'), //     host only
 };
 
 // parseCustomId(componentId) -> { kind, sid, args }. Anything that isn't one of ours, or

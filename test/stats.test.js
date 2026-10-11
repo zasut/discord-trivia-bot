@@ -4,7 +4,7 @@ import { closeDb, initDb } from '../db.js';
 import { seedSampleQuestions } from '../importer.js';
 import { importQuestions } from '../importer.js';
 import { bestHardRun, formatStats, getPlayerStats, peekAnswers, peekCount } from '../stats.js';
-import { playSolo } from '../scripts/testdata.js';
+import { playNight, playSolo } from '../scripts/testdata.js';
 
 beforeEach(() => {
   initDb(':memory:');
@@ -249,5 +249,144 @@ describe('formatStats', () => {
     );
     playSolo({ userId: 'u1', guesses: [right(500)] });
     assert.ok(formatStats(getPlayerStats('u1'), 'u1').includes('\\*\\*Bold\\*\\*'));
+  });
+});
+
+// ---- trivia nights ----------------------------------------------------------------------
+//
+// Red = u1, u2 and u5; Blue = u3 and u4. The host h1 is on neither team.
+//   Q1 (-1): Red u1 right,            Blue u3 wrong
+//   Q2 (-3): Red u2 right,            Blue u4 right (helping u3, who asked for a teammate)
+//   Q3 (-5): Red u1 wrong,            Blue u3 timed out
+// Red wins 2-1. u5 never got a turn.
+
+function playNightFixture(extra = {}) {
+  return playNight({
+    hostId: 'h1',
+    teams: [
+      { name: 'Red', score: 2, won: true, players: ['u1', 'u2', 'u5'] },
+      { name: 'Blue', score: 1, won: false, players: ['u3', 'u4'] },
+    ],
+    questions: [
+      {
+        questionId: -1,
+        board: 1,
+        pickedBy: 'u1',
+        guesses: [
+          { team: 0, userId: 'u1', answer: 'B', correct: true, responseMs: 2000 },
+          { team: 1, userId: 'u3', answer: 'A', correct: false, responseMs: 4000 },
+        ],
+      },
+      {
+        questionId: -3,
+        board: 1,
+        pickedBy: 'u3',
+        guesses: [
+          { team: 0, userId: 'u2', answer: 'B', correct: true, responseMs: 3000 },
+          { team: 1, userId: 'u4', answer: 'B', correct: true, assisted: true, assignedUserId: 'u3', responseMs: 5000 },
+        ],
+      },
+      {
+        questionId: -5,
+        board: 1,
+        pickedBy: 'u1',
+        guesses: [
+          { team: 0, userId: 'u1', answer: 'A', correct: false, responseMs: 1000 },
+          { team: 1, userId: 'u3', timedOut: true },
+        ],
+      },
+    ],
+    ...extra,
+  });
+}
+
+describe('trivia night stats', () => {
+  test('nights played, team wins, what they answered, and assists', () => {
+    playNightFixture();
+    assert.deepEqual(getPlayerStats('u1').nights, { played: 1, wins: 1, answered: 2, correct: 1, percent: 50, assists: 0 });
+    assert.deepEqual(getPlayerStats('u2').nights, { played: 1, wins: 1, answered: 1, correct: 1, percent: 100, assists: 0 });
+    assert.deepEqual(getPlayerStats('u3').nights, { played: 1, wins: 0, answered: 2, correct: 0, percent: 0, assists: 0 });
+    assert.deepEqual(getPlayerStats('u4').nights, { played: 1, wins: 0, answered: 1, correct: 1, percent: 100, assists: 1 });
+  });
+
+  test('a teammate who never got a turn still played the night', () => {
+    playNightFixture();
+    const stats = getPlayerStats('u5');
+    assert.deepEqual(stats.nights, { played: 1, wins: 1, answered: 0, correct: 0, percent: null, assists: 0 });
+    assert.equal(stats.hasData, true);
+  });
+
+  test('the host, who is on no team, has no night stats', () => {
+    playNightFixture();
+    const stats = getPlayerStats('h1');
+    assert.equal(stats.nights, null);
+    assert.equal(stats.hasData, false);
+  });
+
+  test("night answers count toward a player's overall stats, a timeout included", () => {
+    playNightFixture();
+    const { overall } = getPlayerStats('u3');
+    assert.equal(overall.answered, 2);
+    assert.equal(overall.correct, 0);
+    assert.equal(overall.avgMs, 4000, 'the timeout has no response time');
+  });
+
+  test('night answers also show up by grade and subject next to solo ones', () => {
+    playNightFixture();
+    playSolo({ userId: 'u1', guesses: [{ questionId: -1, answer: 'B', correct: true }] });
+    const stats = getPlayerStats('u1');
+    assert.equal(stats.overall.answered, 3);
+    assert.equal(stats.byGrade[0].answered, 2, 'grade 1: Q1 on the night and the solo guess');
+    assert.equal(stats.solo.standard.runs, 1, 'only the solo game is a solo run');
+  });
+
+  test('a night that ended before any question was asked is not counted as played', () => {
+    playNight({
+      hostId: 'h1',
+      status: 'quit',
+      teams: [
+        { name: 'Red', score: 0, players: ['u1'] },
+        { name: 'Blue', score: 0, players: ['u2'] },
+      ],
+      questions: [],
+    });
+    assert.equal(getPlayerStats('u1').nights, null);
+  });
+
+  test('wins count only the nights their team won', () => {
+    playNightFixture();
+    playNightFixture({
+      teams: [
+        { name: 'Red', score: 1, won: false, players: ['u1', 'u2', 'u5'] },
+        { name: 'Blue', score: 2, won: true, players: ['u3', 'u4'] },
+      ],
+    });
+    assert.equal(getPlayerStats('u1').nights.played, 2);
+    assert.equal(getPlayerStats('u1').nights.wins, 1);
+    assert.equal(getPlayerStats('u3').nights.wins, 1);
+  });
+
+  test("formatStats adds a Trivia nights line, with singular and plural wording", () => {
+    playNightFixture();
+    assert.match(
+      formatStats(getPlayerStats('u1'), 'u1'),
+      /\n\*\*Trivia nights:\*\* 1 played · 1 team win · 2 answered \(50% correct\) · 0 assists given$/,
+    );
+    assert.match(
+      formatStats(getPlayerStats('u4'), 'u4'),
+      /\*\*Trivia nights:\*\* 1 played · 0 team wins · 1 answered \(100% correct\) · 1 assist given$/,
+    );
+  });
+
+  test('a player who only watched has a short line and an "answers" placeholder', () => {
+    playNightFixture();
+    const text = formatStats(getPlayerStats('u5'), 'u5');
+    assert.match(text, /\*\*Overall:\*\* no answers yet/);
+    assert.match(text, /\*\*Trivia nights:\*\* 1 played · 1 team win · 0 assists given$/);
+  });
+
+  test('players without a night have no night line', () => {
+    playSolo({ userId: 'u1', guesses: [right(-1)] });
+    assert.ok(!formatStats(getPlayerStats('u1'), 'u1').includes('Trivia nights'));
   });
 });
