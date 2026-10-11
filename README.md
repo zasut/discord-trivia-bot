@@ -10,7 +10,8 @@ URL, tunnel, or endpoint to configure — `npm start` is all it takes to run it.
 
 ## Requirements
 
-- [Node.js](https://nodejs.org/) 18 or newer
+- [Node.js](https://nodejs.org/) 22.13 or newer (the bot uses Node's built-in SQLite, so
+  there is no database to install)
 - A Discord application — create one at <https://discord.com/developers/applications>
 
 ## Setup
@@ -60,7 +61,46 @@ npm run register
 This installs `/start` globally for your app. Re-run it whenever you change `commands.js`.
 Global commands can take a few minutes to appear in clients the first time.
 
-### 5. Start the bot
+### 5. Add your questions
+
+Questions live in a local SQLite database (`data/trivia.db`), not in the repo, so nobody
+can read the answers from GitHub. You write them in a spreadsheet and load them with one
+command.
+
+1. In your spreadsheet, use these column headers (the order doesn't matter):
+
+   | Column | What goes in it |
+   | --- | --- |
+   | `id` | A unique whole number for each question. Never change or reuse one: stats point at it. |
+   | `pack` | `fifthgrader` |
+   | `grade` | 1–5 (leave empty for packs without grades) |
+   | `subject` | e.g. `Science`. Spell it the same way every time: stats are grouped by it. |
+   | `type` | `choice` (multiple choice) or `typed` (the player types the answer, good for math) |
+   | `prompt` | The question |
+   | `choice_a` … `choice_d` | 2–4 choices, filled from `choice_a` with no gaps. Leave empty for `typed`. |
+   | `answer` | `choice`: the letter of the right choice (`A`–`D`). `typed`: the answer itself. |
+   | `accepted` | `typed` only: other answers to accept, separated by `;` (e.g. `twelve;12.0`) |
+   | `source` | Optional: where you found the question |
+
+2. **File → Download → Comma-separated values (.csv)** in Google Sheets, or **Save As → CSV
+   UTF-8** in Excel, and save it as `data/questions.csv` (create the `data` folder if you
+   don't have one). The folder is gitignored, so your questions stay private.
+3. Load it:
+
+   ```bash
+   npm run import                        # reads data/questions.csv
+   npm run import -- path/to/other.csv   # or any other file
+   ```
+
+The whole file is checked first. If anything is wrong, every problem is listed with its
+line number and **nothing** is imported, so fix the spreadsheet and run it again. Re-running
+the import is safe: questions are matched by `id`, edited rows are updated, and questions
+you remove from the file are switched off (their old answers stay in the stats).
+
+Until you do this, the bot loads 20 placeholder questions (`questions/sample.csv`) so you
+can try it out. Importing your own switches them off.
+
+### 6. Start the bot
 
 ```bash
 npm run dev     # auto-restarts on file changes
@@ -71,7 +111,7 @@ npm start       # plain "node app.js"
 You should see `Logged in as <your bot's name>`. If `DISCORD_TOKEN` is missing it exits
 straight away with a message saying so.
 
-### 6. Invite the bot
+### 7. Invite the bot
 
 Under **Installation** (or **OAuth2 → URL Generator**), select the `bot` and
 `applications.commands` scopes, give the bot permission to send messages, open the generated
@@ -106,8 +146,16 @@ Timings live in `constants.js` (`LOBBY_COUNTDOWN_MS`, `QUESTION_TIMEOUT_MS`).
 | `state.js` | In-memory store of active sessions. Not persisted — restarting the bot clears everything. |
 | `trivia.js` | Loads the questions and checks answers. |
 | `utils.js` | Small helpers for the Discord REST API (used to register commands). |
+| `db.js` | Opens the SQLite database and applies schema migrations. |
+| `records.js` | Saves players, games, questions asked, guesses and cheat uses. |
+| `importer.js`, `csv.js` | Check a question CSV and load it into the database. |
+| `questions.js` | Looks questions up in the database. |
+| `rng.js` | All randomness, so tests can make it predictable. |
 | `questions/aystafg.json` | The current question set (Are You Smarter Than A Fifth Grader). |
+| `questions/sample.csv` | 20 placeholder questions used when you haven't imported your own. |
+| `scripts/import-questions.js` | `npm run import`: loads your question CSV. |
 | `scripts/smoke.js` | Runs the whole flow locally with a fake Discord client (`node scripts/smoke.js`). Handy after changing `flow.js`. |
+| `test/` | Unit tests (`npm test` runs these and the smoke test). |
 | `AGENTS.md` | Guide for coding agents: architecture, conventions, rules, and what's planned next. |
 | `DESIGN.md` | The planned design (solo boards, trivia nights, stats, database) and the build plan. |
 
@@ -126,7 +174,7 @@ Timings live in `constants.js` (`LOBBY_COUNTDOWN_MS`, `QUESTION_TIMEOUT_MS`).
 
 ## Notes
 
-- The bot keeps all state in memory. Restarting it abandons any session in progress.
+- The bot keeps games in progress in memory. Restarting it abandons any session in progress.
 - It assumes one trivia session per channel at a time.
 - It's only online while the process is running. For 24/7 use, run it under a process
   manager (e.g. pm2) on a machine that stays awake.

@@ -10,13 +10,16 @@
 export const QUESTION_TIMEOUT_MS = 10_000; // per-question answer window
 export const LOBBY_COUNTDOWN_MS = 60_000; // public lobby countdown before questions auto-start
 
-// Game modes shown in the ephemeral /start picker. Data-driven so
-// flow.js / trivia.js can render buttons from this list. Only `enabled` modes do
-// anything this sprint.
-export const MODES = [
-  { key: 'fifthgrader', label: 'Are You Smarter Than a Fifth Grader', enabled: true },
-  { key: 'trivia2', label: 'Coming Soon', enabled: false },
+// Question packs shown in the ephemeral /start picker (DESIGN.md "Terms"). `graded`
+// packs organise their questions by grade 1-5 (the question CSV must give a grade);
+// ungraded packs must leave it empty. Only `enabled` packs can be played.
+export const PACKS = [
+  { key: 'fifthgrader', label: 'Are You Smarter Than a Fifth Grader', enabled: true, graded: true },
+  { key: 'trivia2', label: 'Coming Soon', enabled: false, graded: false },
 ];
+
+// Old name, used by flow.js until the solo rewrite replaces it.
+export const MODES = PACKS;
 
 // --- custom_id builders -------------------------------------------------------
 // Every builder takes `sid`. Answer ids also take `qIndex` (0-based question index)

@@ -2,16 +2,18 @@
   "name": "discord-trivia-bot",
   "private": true,
   "version": "1.0.0",
-  "description": "Discord trivia bot (walking-skeleton MVP)",
+  "description": "Discord trivia bot",
   "main": "app.js",
   "type": "module",
   "engines": {
-    "node": ">=18.x"
+    "node": ">=22.13"
   },
   "scripts": {
     "start": "node app.js",
     "register": "node commands.js",
-    "dev": "nodemon app.js"
+    "dev": "nodemon app.js",
+    "test": "node --test && node scripts/smoke.js",
+    "import": "node scripts/import-questions.js"
   },
   "license": "MIT",
   "dependencies": {

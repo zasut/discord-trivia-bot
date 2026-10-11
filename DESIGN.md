@@ -440,6 +440,7 @@ ui.js            button / row / select / modal builders, question rendering
 answers.js       typed-answer normalization + answer checking (pure)
 questions.js     question queries: pick for a tile, availability checks, Peek distribution
 csv.js           RFC 4180 CSV parser (pure)
+importer.js      CSV validation + upsert into the database, sample seeding
 db.js            open the database, migrations
 records.js       writes: players, games, teams, game_questions, guesses, cheat uses
 stats.js         reads: /stats and /leaderboard queries + formatting
@@ -527,21 +528,21 @@ These rules apply when an agent works through the phases on its own:
 
 ### Phase 1: Database and question import
 
-- [ ] `package.json`: `engines.node` `>=22.13`; scripts `"test": "node --test && node scripts/smoke.js"`
+- [x] `package.json`: `engines.node` `>=22.13`; scripts `"test": "node --test && node scripts/smoke.js"`
   and `"import": "node scripts/import-questions.js"`. Add `data/` to `.gitignore`.
-- [ ] `db.js` as specified in [Database](#database), with `initDb(path)` and migration 1.
-- [ ] `csv.js`, the import validation and upsert logic (shared by the script and the
+- [x] `db.js` as specified in [Database](#database), with `initDb(path)` and migration 1.
+- [x] `csv.js`, the import validation and upsert logic (shared by the script and the
   auto-seed), `scripts/import-questions.js`, and `questions/sample.csv`.
-- [ ] `records.js` with the writes the solo game needs: players, games, game_questions,
+- [x] `records.js` with the writes the solo game needs: players, games, game_questions,
   guesses, cheat uses.
-- [ ] `rng.js`.
-- [ ] `app.js` calls `initDb()` and seeds the samples when no active questions exist,
+- [x] `rng.js`.
+- [x] `app.js` calls `initDb()` and seeds the samples when no active questions exist,
   before logging in.
-- [ ] Unit tests: CSV parsing (quotes, embedded commas and newlines, `""`, BOM, CRLF), every
+- [x] Unit tests: CSV parsing (quotes, embedded commas and newlines, `""`, BOM, CRLF), every
   validation error, upsert + deactivate, migrations safe to run twice, abandoning stale
   `in_progress` games.
-- [ ] The existing game flow is untouched and the smoke test still passes.
-- [ ] README: Node 22.13+, how to export the spreadsheet as CSV UTF-8 and run
+- [x] The existing game flow is untouched and the smoke test still passes.
+- [x] README: Node 22.13+, how to export the spreadsheet as CSV UTF-8 and run
   `npm run import`.
 
 Commit: `Add SQLite database and question import`
@@ -636,3 +637,15 @@ for every judgment call they make during implementation.
 - Typed answers are matched exactly after normalization, with no fuzzy matching.
 - Solo games are public in the channel (anyone can watch) but only the player can click.
 - Commands are guild-only.
+- Phase 1: the import code lives in `importer.js` (validate, upsert, seed), shared by
+  `scripts/import-questions.js` and `app.js`. `PACKS` was added to `constants.js`, and
+  `MODES` stays as an alias of it until Phase 2 replaces it.
+- Phase 1: CSV header names are trimmed and matched case-insensitively. Choices are
+  compared case-insensitively when checking they are all different. A `typed` answer has
+  no length limit. Rows with more non-empty values than the header has columns are an
+  error; shorter rows are padded with empty values.
+- Phase 1: a database whose `user_version` is newer than the code's migrations is
+  refused with an error instead of being used, because older code could corrupt a newer
+  schema.
+- Phase 1: the sample questions are loaded without deactivating anything. A real
+  `npm run import` deactivates them, since they aren't in the real file.

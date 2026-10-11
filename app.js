@@ -1,10 +1,24 @@
 import 'dotenv/config';
 import { Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 import { handleInteraction } from './flow.js';
+import { initDb } from './db.js';
+import { seedSampleQuestions } from './importer.js';
+import { countActiveQuestions } from './questions.js';
 
 if (!process.env.DISCORD_TOKEN) {
   console.error('DISCORD_TOKEN is missing — add it to .env (see .env.sample).');
   process.exit(1);
+}
+
+// Open the database before anything can ask for a question. A fresh clone has no
+// questions at all, so load the bundled placeholders to keep it playable.
+initDb();
+if (countActiveQuestions() === 0) {
+  const { added } = seedSampleQuestions();
+  console.warn(
+    `No questions in the database — loaded ${added} sample questions. ` +
+      'Put your real ones in data/questions.csv and run `npm run import`.',
+  );
 }
 
 // Gateway bot: we open a websocket to Discord and it pushes interactions down it, so

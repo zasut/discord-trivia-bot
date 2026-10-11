@@ -13,23 +13,28 @@ open to Discord, so there is no HTTP server, tunnel or public URL. The only play
 private (ephemeral) setup, posts a public lobby with a countdown, asks timed yes/no
 questions and then posts the score.
 
-- Node.js ≥ 18, ES modules (`"type": "module"`), plain JavaScript.
-- Dependencies: `discord.js`, `dotenv`. Dev: `nodemon`.
-- No build step, linter, formatter config or test framework. Match the style of the
-  surrounding code (2-space indent, single quotes, semicolons, trailing commas).
+- Node.js ≥ 22.13 (for the built-in `node:sqlite`), ES modules (`"type": "module"`), plain
+  JavaScript.
+- Dependencies: `discord.js`, `dotenv`. Dev: `nodemon`. The database is `node:sqlite` and
+  the tests use `node:test`, so neither adds a dependency.
+- No build step, linter or formatter config. Match the style of the surrounding code
+  (2-space indent, single quotes, semicolons, trailing commas).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `npm install` | Install dependencies. |
-| `node scripts/smoke.js` | Offline end-to-end test that uses a fake Discord client. Needs no credentials. **This is how you verify a change.** |
+| `npm test` | Unit tests (`node --test`, files in `test/`) followed by the smoke test. **This is how you verify a change.** Needs no credentials. |
+| `node scripts/smoke.js` | Just the offline end-to-end test, which uses a fake Discord client. |
 | `npm start` / `npm run dev` | Run the bot (`node app.js` / nodemon). Logs in with the real token from `.env`. |
 | `npm run register` | Bulk-overwrites the app's **global** slash commands on Discord with `commands.js`. |
+| `npm run import [-- path]` | Validates a question CSV and loads it into the database (default `data/questions.csv`). |
 
-`npm start`, `npm run dev` and `npm run register` use the user's live Discord app. Agents
-can't click buttons in Discord, so leave live runs and command registration to the user
-unless they ask.
+`npm start`, `npm run dev`, `npm run register` and `npm run import` use the user's live
+Discord app or their real database. Agents can't click buttons in Discord, so leave live
+runs, command registration and real imports to the user unless they ask. To test the import
+script, point it at a scratch file and set `TRIVIA_DB_PATH` to a scratch database.
 
 ## Rules
 
@@ -38,12 +43,12 @@ unless they ask.
   it, ask the user. If you notice anything reading or writing `.env` unexpectedly (a
   script, a tool, a command), report it. Only `.env.sample` (placeholders) is tracked, and
   `.env` must stay gitignored.
-- **Smoke test is mandatory.** Run `node scripts/smoke.js` after any change to `flow.js`,
-  `state.js`, `constants.js` or `trivia.js`, and report the result. When you add a screen,
-  button or command, extend `scripts/smoke.js` to drive it.
-- **`data/` is off-limits too.** Once it exists, it holds the user's private question bank
-  and real stats. Never read or modify it unless asked. Tests use `:memory:` or a temp
-  directory.
+- **Tests are mandatory.** Run `npm test` after any code change and report the result. When
+  you add a screen, button or command, extend `scripts/smoke.js` to drive it, and cover pure
+  logic and database queries with unit tests in `test/`.
+- **`data/` is off-limits too.** It holds the user's private question bank
+  (`data/questions.csv`) and real stats (`data/trivia.db`). Never read, modify or import from
+  it unless asked. Tests use `:memory:` or a temp directory.
 - **No commits unless asked.** Don't `git commit` or `git push` unless the user explicitly
   asks. Working through DESIGN.md's build plan counts as asking for one commit per phase.
 - **Commit messages** are one short line in the imperative, e.g.
@@ -66,9 +71,39 @@ unless they ask.
 | `trivia.js` | Loads `questions/aystafg.json` at import time. Exports `getQuestions`, `getQuestion(i)`, `checkAnswer(q, value)` and `QUESTION_COUNT`. |
 | `commands.js` | Slash-command definitions. Running it (`npm run register`) pushes them to Discord. |
 | `utils.js` | `DiscordRequest` / `InstallGlobalCommands` (REST), used only by `commands.js`. The running bot doesn't use this file. `getRandomEmoji` and `capitalize` are unused leftovers from the Discord example-app template. |
-| `questions/aystafg.json` | Question bank. "aystafg" = **A**re **Y**ou **S**marter **T**han **A** **F**ifth **G**rader. |
+| `questions/aystafg.json` | The old question bank, still used by the game flow until the solo rewrite (DESIGN.md Phase 2). "aystafg" = **A**re **Y**ou **S**marter **T**han **A** **F**ifth **G**rader. |
+| `db.js` | `initDb(path)` / `getDb()` / `closeDb()` / `transaction(fn)`, the numbered migrations and the stale-game cleanup. |
+| `records.js` | Every database write for games: players, games, teams, questions shown, guesses, cheat uses. |
+| `questions.js` | Question queries (reads only). |
+| `importer.js` | `parseQuestions` (validate CSV text), `importQuestions` (upsert), `importFile`, `seedSampleQuestions`. |
+| `csv.js` | RFC 4180 CSV parser, no dependency. |
+| `rng.js` | `random`, `randomInt`, `pick`, `shuffle`. All randomness goes through it so tests can call `setRng(fn)` / `resetRng()`. |
+| `questions/sample.csv` | 20 placeholder questions with negative ids. Loaded automatically when the database has no active questions. |
+| `scripts/import-questions.js` | The `npm run import` script. |
 | `scripts/smoke.js` | Offline end-to-end test (see Commands). |
+| `test/*.test.js` | Unit tests (`node:test`). |
 | `DESIGN.md` | The agreed design (question bank, solo, trivia night, stats, database) and the phased build plan. |
+
+## Database
+
+SQLite via `node:sqlite` (`DatabaseSync`, synchronous). The schema and conventions are in
+DESIGN.md "Database"; the schema itself is the `MIGRATIONS` array in `db.js`.
+
+- `app.js` calls `initDb()` before logging in. The file is `data/trivia.db`, or
+  `TRIVIA_DB_PATH`. It marks games left `in_progress` by a crash or restart as `abandoned`,
+  and refuses a database whose schema is newer than the code.
+- Change the schema only by **appending** a migration to `MIGRATIONS`. Never edit one that
+  has shipped.
+- Discord ids are TEXT everywhere. Never bind `undefined` (use `null`): `records.js` already
+  normalises its optional arguments.
+- `getDb()` is a process-wide connection, so unit tests call `initDb(':memory:')` in
+  `beforeEach` and `closeDb()` in `afterEach`. `db.exec('BEGIN')` transactions must be
+  synchronous: use `transaction(fn)`.
+- Rows come back as null-prototype objects. Spread them (`{ ...row }`) before
+  `assert.deepEqual`.
+- Writes go through `records.js` as they happen. `importer.js` is the only writer of the
+  `questions` table, and it deactivates questions rather than deleting them because guesses
+  reference them.
 
 ## Interaction flow
 
@@ -242,4 +277,6 @@ and record any judgment call in its Decisions log. The phases, in order:
 5. **Trivia night:** sign-up, teams, rotating answerers, Ask a teammate, host controls.
 6. **Leaderboard and analysis:** `/leaderboard` and saved SQL queries.
 
-The sections above describe the code before Phase 1. Update them as each phase lands.
+**Done so far:** Phase 1. The game flow described above is still the old yes/no flow from
+before Phase 2, and it doesn't use the database yet. Update the sections above as each
+phase lands.

@@ -1,0 +1,21 @@
+id,pack,grade,subject,type,prompt,choice_a,choice_b,choice_c,choice_d,answer,accepted,source
+-1,fifthgrader,1,Math,choice,[Sample] What is 2 + 2?,3,4,5,6,B,,bundled sample
+-2,fifthgrader,1,Math,typed,[Sample] What is 1 + 1?,,,,,2,two,bundled sample
+-3,fifthgrader,1,Animals,choice,[Sample] Which animal says moo?,Cat,Cow,Dog,,B,,bundled sample
+-4,fifthgrader,1,Animals,choice,[Sample] Which of these animals can fly?,Dog,Fish,Bird,Cow,C,,bundled sample
+-5,fifthgrader,2,Spelling,choice,[Sample] Which word is spelled correctly?,Freind,Friend,Frend,,B,,bundled sample
+-6,fifthgrader,2,Spelling,typed,[Sample] Type the name of the color of grass.,,,,,green,,bundled sample
+-7,fifthgrader,2,Geography,choice,[Sample] Which of these is an ocean?,Pacific,Sahara,Everest,,A,,bundled sample
+-8,fifthgrader,2,Geography,choice,[Sample] How many continents are there?,5,6,7,8,C,,bundled sample
+-9,fifthgrader,3,Science,choice,[Sample] What state of matter is water at room temperature?,Solid,Liquid,Gas,,B,,bundled sample
+-10,fifthgrader,3,Science,typed,[Sample] What planet do we live on?,,,,,Earth,the earth;planet earth,bundled sample
+-11,fifthgrader,3,History,choice,[Sample] Who was the first president of the United States?,Abraham Lincoln,George Washington,Thomas Jefferson,,B,,bundled sample
+-12,fifthgrader,3,History,choice,[Sample] In which country are the pyramids of Giza?,Egypt,Peru,Italy,India,A,,bundled sample
+-13,fifthgrader,4,Grammar,choice,[Sample] Which word is a noun?,Run,Dog,Quickly,Blue,B,,bundled sample
+-14,fifthgrader,4,Grammar,typed,[Sample] What is the plural of mouse?,,,,,mice,,bundled sample
+-15,fifthgrader,4,Health,choice,[Sample] Which food group does milk belong to?,Dairy,Grains,Vegetables,,A,,bundled sample
+-16,fifthgrader,4,Health,choice,[Sample] Which of these is best for your teeth?,Drinking soda,Eating candy,Brushing daily,,C,,bundled sample
+-17,fifthgrader,5,Astronomy,choice,[Sample] Which planet is closest to the Sun?,Venus,Mars,Earth,Mercury,D,,bundled sample
+-18,fifthgrader,5,Astronomy,typed,[Sample] What is the name of the star at the center of our solar system?,,,,,Sun,the sun,bundled sample
+-19,fifthgrader,5,Literature,choice,[Sample] Who wrote Charlotte's Web?,E. B. White,Dr. Seuss,Roald Dahl,,A,,bundled sample
+-20,fifthgrader,5,Literature,choice,[Sample] What kind of animal is Wilbur in Charlotte's Web?,Spider,Pig,Goose,,B,,bundled sample
