@@ -1,8 +1,9 @@
 # Discord Trivia Bot
 
-A Discord bot for running trivia games in a channel. You start a session with `/start`, pick
-a game mode, open a lobby, and the bot walks everyone through the questions with a timer on
-each one.
+A Discord bot for running trivia in a server. Right now you can play **Are You Smarter Than a
+Fifth Grader** solo: `/start` opens a board of grade + subject tiles, you climb from 1st to
+5th grade answering timed questions, and every game and guess is saved so stats can be built
+on top. Trivia nights with teams are designed (see [DESIGN.md](DESIGN.md)) but not built yet.
 
 This is a **gateway** bot built on [discord.js](https://discord.js.org/). It connects out to
 Discord over a websocket, so it shows as online in the member list and there is no public
@@ -58,8 +59,9 @@ below.
 npm run register
 ```
 
-This installs `/start` globally for your app. Re-run it whenever you change `commands.js`.
-Global commands can take a few minutes to appear in clients the first time.
+This installs the slash commands globally for your app, for use in servers (not DMs).
+Re-run it whenever `commands.js` changes. Global commands can take a few minutes to appear in
+clients the first time.
 
 ### 5. Add your questions
 
@@ -114,47 +116,58 @@ straight away with a message saying so.
 ### 7. Invite the bot
 
 Under **Installation** (or **OAuth2 → URL Generator**), select the `bot` and
-`applications.commands` scopes, give the bot permission to send messages, open the generated
-URL, and add it to a server you can test in.
+`applications.commands` scopes, give the bot permission to view and send messages in the
+channels you'll play in, open the generated URL, and add it to a server you can test in.
 
-Then type `/start` in any channel.
+Then type `/start` in a channel the bot can see.
 
-## How the round works
+## How a solo game works
 
-1. `/start` — a private (ephemeral) prompt asking which game mode you want.
-2. Pick **Are You Smarter Than a Fifth Grader** → a confirmation screen with **Confirm** /
-   **Back**.
-3. Confirm → a **Solo or teams?** screen. Solo continues; the Teams button is a placeholder
-   for now.
-4. Solo → the bot posts a public message in the channel with a ~60-second countdown and
-   **Start Now** / **Cancel**. When the countdown ends (or someone hits Start Now), the
-   questions begin.
-5. Each question shows **Yes** / **No** and gives you 10 seconds. You get told whether you
-   were right; if the timer runs out it reveals the answer and moves on.
-6. After the last question the bot posts your score and ends the session.
+1. `/start` is a private (ephemeral) setup: pick **Are You Smarter Than a Fifth Grader**,
+   **Confirm**, choose **Solo**, then a difficulty:
 
-Timings live in `constants.js` (`LOBBY_COUNTDOWN_MS`, `QUESTION_TIMEOUT_MS`).
+   | | Hard | Standard | Casual |
+   | --- | --- | --- | --- |
+   | Lives | 1 (the first miss ends the run) | 3 | unlimited |
+   | Cheats | none | 1 per run | unlimited |
+   | Stats | count, plus a Hard section | count | saved but don't count |
+
+   (Cheats arrive in a later update.)
+2. The bot posts the **board** in the channel: two tiles per grade, like "3rd · Science".
+   Only the lowest grade you haven't finished is playable, so you climb from 1st to 5th.
+   Only you can press the buttons in your game, and only one game can run per channel.
+3. Pick a tile and a question appears with a countdown. Multiple-choice questions have
+   **A–D** buttons (shuffled every time); typed questions have an **Answer** button that
+   opens a text box. Running out of time counts as a miss.
+4. The result replaces the question, then a fresh board appears. Misses cost lives.
+5. The run ends when you clear the board, run out of lives, press **Quit**, or leave the
+   board alone for 5 minutes. The bot posts a summary of how it went.
+
+Timings and difficulties live in `constants.js`.
 
 ## Project layout
 
 | File | What it's for |
 | --- | --- |
-| `app.js` | Creates the discord.js client, logs in to the gateway, and hands every interaction to `flow.js`. |
-| `flow.js` | All the game logic — every screen, the question loop, and the per-question / countdown timers. |
-| `commands.js` | Defines and registers the `/start` command. |
-| `constants.js` | Button ID scheme, the mode list, and the timing constants. |
-| `state.js` | In-memory store of active sessions. Not persisted — restarting the bot clears everything. |
-| `trivia.js` | Loads the questions and checks answers. |
+| `app.js` | Opens the database, creates the discord.js client, logs in to the gateway, and hands every interaction to `flow.js`. |
+| `flow.js` | Routes every command, button and pop-up, and runs the private `/start` setup screens. |
+| `solo.js` | A solo game: the board, questions, answers, lives, timers and the summary. |
+| `board.js` | Builds the grade + subject board and draws it as buttons. |
+| `ui.js`, `messages.js` | Build the message text and buttons, and send / edit / delete messages in the channel. |
+| `answers.js` | Checks typed answers (ignoring case and punctuation, comparing numbers as numbers). |
+| `commands.js` | Defines and registers the slash commands. |
+| `constants.js` | The packs, difficulties, timings and the button ID scheme. |
+| `state.js` | In-memory store of games in progress. Not persisted — restarting the bot clears them. |
 | `utils.js` | Small helpers for the Discord REST API (used to register commands). |
 | `db.js` | Opens the SQLite database and applies schema migrations. |
 | `records.js` | Saves players, games, questions asked, guesses and cheat uses. |
+| `stats.js` | Stats queries. |
 | `importer.js`, `csv.js` | Check a question CSV and load it into the database. |
 | `questions.js` | Looks questions up in the database. |
 | `rng.js` | All randomness, so tests can make it predictable. |
-| `questions/aystafg.json` | The current question set (Are You Smarter Than A Fifth Grader). |
 | `questions/sample.csv` | 20 placeholder questions used when you haven't imported your own. |
 | `scripts/import-questions.js` | `npm run import`: loads your question CSV. |
-| `scripts/smoke.js` | Runs the whole flow locally with a fake Discord client (`node scripts/smoke.js`). Handy after changing `flow.js`. |
+| `scripts/smoke.js`, `scripts/fakes.js` | Plays whole games locally against a fake Discord (`node scripts/smoke.js`). |
 | `test/` | Unit tests (`npm test` runs these and the smoke test). |
 | `AGENTS.md` | Guide for coding agents: architecture, conventions, rules, and what's planned next. |
 | `DESIGN.md` | The planned design (solo boards, trivia nights, stats, database) and the build plan. |
@@ -174,7 +187,9 @@ Timings live in `constants.js` (`LOBBY_COUNTDOWN_MS`, `QUESTION_TIMEOUT_MS`).
 
 ## Notes
 
-- The bot keeps games in progress in memory. Restarting it abandons any session in progress.
-- It assumes one trivia session per channel at a time.
+- Games in progress live in memory, so restarting the bot abandons them (they're marked
+  abandoned in the database). Every game and guess is saved to `data/trivia.db` as it
+  happens.
+- Only one game can run in a channel at a time.
 - It's only online while the process is running. For 24/7 use, run it under a process
   manager (e.g. pm2) on a machine that stays awake.

@@ -437,6 +437,7 @@ solo.js          solo runs: board, questions, cheats, end of run
 night.js         trivia night: sign-up, team builder, rounds, reveal, end
 board.js         board building + rendering shared by solo and night
 ui.js            button / row / select / modal builders, question rendering
+messages.js      send / edit / delete public messages by channel id
 answers.js       typed-answer normalization + answer checking (pure)
 questions.js     question queries: pick for a tile, availability checks, Peek distribution
 csv.js           RFC 4180 CSV parser (pure)
@@ -450,6 +451,7 @@ state.js         in-memory sessions + timers
 commands.js      slash-command definitions
 scripts/import-questions.js   npm run import
 scripts/smoke.js              offline end-to-end test with a fake client
+scripts/fakes.js              the fake Discord client + interaction builders the smoke test uses
 questions/sample.csv          committed placeholder questions
 test/*.test.js                unit tests (node:test)
 docs/queries.sql              example analysis queries
@@ -549,19 +551,19 @@ Commit: `Add SQLite database and question import`
 
 ### Phase 2: Solo board game
 
-- [ ] Rename modes to packs (`MODES` → `PACKS`) and move to the new custom_id scheme.
-- [ ] Setup screens: pack → confirm → format (**Trivia night** shown disabled, "coming
+- [x] Rename modes to packs (`MODES` → `PACKS`) and move to the new custom_id scheme.
+- [x] Setup screens: pack → confirm → format (**Trivia night** shown disabled, "coming
   soon") → difficulty.
-- [ ] Board building and rendering, the climb rule, and question messages for `choice`
+- [x] Board building and rendering, the climb rule, and question messages for `choice`
   (shuffled, position-based buttons) and `typed` (modal).
-- [ ] `answers.js` normalization and checking.
-- [ ] Lives per difficulty, Quit, idle timers, the end-of-run summary, the
+- [x] `answers.js` normalization and checking.
+- [x] Lives per difficulty, Quit, idle timers, the end-of-run summary, the
   fresh-message-per-screen flow, `allowedMentions`, and one public game per channel.
-- [ ] Record players, games, game_questions and guesses as they happen.
-- [ ] Commands become guild-only.
-- [ ] Delete `trivia.js` and `questions/aystafg.json`. Remove the unused `getRandomEmoji`
+- [x] Record players, games, game_questions and guesses as they happen.
+- [x] Commands become guild-only.
+- [x] Delete `trivia.js` and `questions/aystafg.json`. Remove the unused `getRandomEmoji`
   and `capitalize` from `utils.js`.
-- [ ] Tests:
+- [x] Tests:
   - Unit tests for normalization (case, punctuation, numbers, thousands separators,
     accepted list), board building (stubbed rng, missing subjects, climb rule) and
     question picking.
@@ -649,3 +651,27 @@ for every judgment call they make during implementation.
   schema.
 - Phase 1: the sample questions are loaded without deactivating anything. A real
   `npm run import` deactivates them, since they aren't in the real file.
+- Phase 2: `cid` only has builders for the kinds that exist so far. Each later phase adds
+  its own. `parseCustomId` returns `{ kind, sid, args }` with `args` as strings.
+- Phase 2: a tile can only be played after the lower grades are done, and both tiles of a
+  grade must be played before the next grade opens. Tiles within a grade are ordered
+  alphabetically by subject so the layout is stable.
+- Phase 2: if a tile has no unused question when it is pressed (an import deactivated them
+  while the game was running), the tile becomes `skipped` (➖, no guess, no life lost)
+  instead of erroring. If that was the last open tile the run completes.
+- Phase 2: the question number shown is "questions answered so far + 1", so it isn't
+  affected by `seq` (which Swap will advance in Phase 3).
+- Phase 2: a result message always names the correct answer, even when the player was
+  right. A typed guess is stored as typed (trimmed, at most 200 characters) and shown with
+  Markdown escaped.
+- Phase 2: if the bot can't post the board or a question, the game is recorded as
+  `abandoned`, the channel is freed, and the player gets an ephemeral note.
+- Phase 2: Quit and the idle timeout delete the board before posting the summary, so no
+  dead buttons are left behind. A finished run's old question messages stay as history.
+- Phase 2: every press on a setup screen restarts its `SETUP_IDLE_MS` timer, so it only
+  expires after 15 idle minutes.
+- Phase 2: `/start` used outside a server replies with an ephemeral note, as a safety net
+  even though the command is registered guild-only.
+- Phase 2: the question-picking preference for fewer-seen questions counts every earlier
+  guess by that player on the question, including timeouts and Casual ones.
+- Phase 2: the typed-answer text box allows up to 100 characters.

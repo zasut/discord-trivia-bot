@@ -1,17 +1,19 @@
 # AGENTS.md
 
 Guide for coding agents working in this repo. Human setup and run steps (Developer Portal,
-`.env`, inviting the bot) are in [README.md](README.md). This file covers how the code
-works today and how to change it safely. The planned design and the build plan to get
-there are in [DESIGN.md](DESIGN.md).
+`.env`, inviting the bot, loading questions) are in [README.md](README.md). This file
+covers how the code works today and how to change it safely. The full design and the build
+plan are in [DESIGN.md](DESIGN.md).
 
 ## Project
 
 A Discord trivia bot built on **discord.js v14** as a **gateway bot**. It keeps a websocket
-open to Discord, so there is no HTTP server, tunnel or public URL. The only playable mode is
-**"Are You Smarter Than a Fifth Grader"**, solo only. `/start` takes one user through a
-private (ephemeral) setup, posts a public lobby with a countdown, asks timed yes/no
-questions and then posts the score.
+open to Discord, so there is no HTTP server, tunnel or public URL. The playable game is
+**"Are You Smarter Than a Fifth Grader"**, solo: `/start` takes the player through a private
+(ephemeral) setup, then posts a public board of grade + subject tiles. They climb from
+1st to 5th grade, answering multiple-choice or typed questions against a timer. Every game
+and guess is saved to a local SQLite database. Trivia night (teams) is designed but not
+built yet; see Roadmap.
 
 - Node.js ≥ 22.13 (for the built-in `node:sqlite`), ES modules (`"type": "module"`), plain
   JavaScript.
@@ -50,12 +52,15 @@ script, point it at a scratch file and set `TRIVIA_DB_PATH` to a scratch databas
   (`data/questions.csv`) and real stats (`data/trivia.db`). Never read, modify or import from
   it unless asked. Tests use `:memory:` or a temp directory.
 - **No commits unless asked.** Don't `git commit` or `git push` unless the user explicitly
-  asks. Working through DESIGN.md's build plan counts as asking for one commit per phase.
+  asks. Working through DESIGN.md's build plan counts as asking for one commit per phase,
+  plus a separate `Fix ...` commit for any bug found in code that is already committed.
 - **Commit messages** are one short line in the imperative, e.g.
   `Add solo board game with difficulties`. No body, and no AI attribution (no
   `Co-Authored-By` trailer, no "Generated with" footer).
 - **Ask before adding npm dependencies.** The DESIGN.md plan needs none: it uses Node
   built-ins (`node:sqlite`, `node:test`).
+- **Never put anything in a custom_id that reveals an answer.** Players can read custom_ids
+  in their Discord client.
 - **Keep this file in sync.** When you change the custom_id scheme, slash commands, session
   shape, tunables or file layout, update the matching section here in the same change.
   When a DESIGN.md phase lands, tick it there too.
@@ -64,23 +69,28 @@ script, point it at a scratch file and set `TRIVIA_DB_PATH` to a scratch databas
 
 | File | Role |
 |---|---|
-| `app.js` | Thin shell. Creates the discord.js `Client` (intent `Guilds` only), logs in and forwards every `InteractionCreate` to `handleInteraction`. If a handler throws, it sends the user an ephemeral error notice. |
-| `flow.js` | All game logic: the `handleInteraction` entry point, the per-button `handleComponent` switch, payload builders (`button`, `row`, `*Components`), channel helpers and the game loop. |
-| `constants.js` | Tunables, `MODES`, the `cid.*` custom_id builders and `parseCustomId`. |
-| `state.js` | In-memory session `Map` keyed by `sid`, plus timer-handle helpers. |
-| `trivia.js` | Loads `questions/aystafg.json` at import time. Exports `getQuestions`, `getQuestion(i)`, `checkAnswer(q, value)` and `QUESTION_COUNT`. |
-| `commands.js` | Slash-command definitions. Running it (`npm run register`) pushes them to Discord. |
-| `utils.js` | `DiscordRequest` / `InstallGlobalCommands` (REST), used only by `commands.js`. The running bot doesn't use this file. `getRandomEmoji` and `capitalize` are unused leftovers from the Discord example-app template. |
-| `questions/aystafg.json` | The old question bank, still used by the game flow until the solo rewrite (DESIGN.md Phase 2). "aystafg" = **A**re **Y**ou **S**marter **T**han **A** **F**ifth **G**rader. |
+| `app.js` | Thin shell. Opens the database (seeding the sample questions if it is empty), creates the discord.js `Client` (intent `Guilds` only), logs in and forwards every `InteractionCreate` to `handleInteraction`. If a handler throws, it sends the user an ephemeral error notice. |
+| `flow.js` | `handleInteraction`, the single router for commands, buttons and modal submits, plus the ephemeral `/start` setup screens. |
+| `solo.js` | Solo runs: the board, questions, answers, lives, timers and the end-of-run summary. |
+| `board.js` | Building the Fifth Grader board from the question bank, the climb rule, and rendering it as button rows. |
+| `ui.js` | Payload builders: `button`, `row`, question / result text, the answer modal, `publicPayload`, `displayName`. Pure. |
+| `messages.js` | `sendMessage` / `editMessage` / `deleteMessage` by channel id. Mentions never ping. |
+| `answers.js` | Typed-answer normalisation and checking. Pure. |
+| `constants.js` | `PACKS`, `DIFFICULTIES`, tunables, `timing`, and the `cid` custom_id builders + `parseCustomId`. |
+| `state.js` | In-memory session `Map` keyed by `sid`, plus the one-timer-per-session helpers `armTimer` / `clearTimer`. |
 | `db.js` | `initDb(path)` / `getDb()` / `closeDb()` / `transaction(fn)`, the numbered migrations and the stale-game cleanup. |
 | `records.js` | Every database write for games: players, games, teams, questions shown, guesses, cheat uses. |
-| `questions.js` | Question queries (reads only). |
+| `questions.js` | Question queries (reads only): `getQuestion`, `subjectsAvailable`, `pickQuestionForTile`, `countActiveQuestions`. |
+| `stats.js` | Stats queries (reads only). So far just `bestHardRun`. |
 | `importer.js` | `parseQuestions` (validate CSV text), `importQuestions` (upsert), `importFile`, `seedSampleQuestions`. |
 | `csv.js` | RFC 4180 CSV parser, no dependency. |
 | `rng.js` | `random`, `randomInt`, `pick`, `shuffle`. All randomness goes through it so tests can call `setRng(fn)` / `resetRng()`. |
+| `commands.js` | Slash-command definitions. Running it (`npm run register`) pushes them to Discord. |
+| `utils.js` | `DiscordRequest` / `InstallGlobalCommands` (REST), used only by `commands.js`. |
 | `questions/sample.csv` | 20 placeholder questions with negative ids. Loaded automatically when the database has no active questions. |
 | `scripts/import-questions.js` | The `npm run import` script. |
-| `scripts/smoke.js` | Offline end-to-end test (see Commands). |
+| `scripts/smoke.js` | Offline end-to-end test: whole games driven through `handleInteraction`, then the database checked. |
+| `scripts/fakes.js` | The fake Discord used by the smoke test (and some unit tests): a recording client, interaction builders, and `seededRng`. |
 | `test/*.test.js` | Unit tests (`node:test`). |
 | `DESIGN.md` | The agreed design (question bank, solo, trivia night, stats, database) and the phased build plan. |
 
@@ -104,179 +114,225 @@ DESIGN.md "Database"; the schema itself is the `MIGRATIONS` array in `db.js`.
 - Writes go through `records.js` as they happen. `importer.js` is the only writer of the
   `questions` table, and it deactivates questions rather than deleting them because guesses
   reference them.
+- A guess is **counted** (toward stats) unless it was made in a Casual solo run. Casual
+  guesses are still saved. `stats.js` exports `COUNTED`, the SQL condition for this.
 
 ## Interaction flow
 
-1. **`/start`** creates the session and replies (ephemeral) with *"Which trivia game
-   mode?"*: one button per `MODES` entry, with disabled modes shown disabled.
-2. **Mode button** updates to *"You've selected: **&lt;label&gt;**"* with **Confirm** /
-   **Back**.
-3. **Confirm** updates to *"Solo or teams?"* with **Solo** / **Teams** / **Back**. Teams is
-   a placeholder that re-shows this screen with a "coming soon" note.
-4. **Solo** updates the ephemeral message to *"Lobby posted in the channel 👇"*, then sends
-   a public lobby: *"**Are You Smarter Than a Fifth Grader** — starting `<t:UNIX:R>`"* with
-   **Start Now** / **Cancel**, and arms a `LOBBY_COUNTDOWN_MS` timer.
-   - **Start Now** (`deferUpdate`) or the timer starts the questions.
-   - **Cancel** (`update`) edits the lobby to "Trivia cancelled." and deletes the session.
-5. **Questions.** Q1 edits the lobby message in place. Every later question is a fresh
-   channel message. Each has **Yes** / **No** and a `QUESTION_TIMEOUT_MS` timer.
-   - An answer `update`s the message to *"You answered **yes** — ✅ Correct!"* or
-     *"❌ Incorrect."*
-   - A timeout edits the message to *"⏰ Time's up! The answer was **&lt;answer&gt;**."*
-   - After `RESULT_READ_MS` the next question is posted.
-6. **Completion** sends *"🏁 Trivia complete! You got **X/N** correct."* and deletes the
-   session. Nothing is persisted.
+**Setup** (ephemeral, `flow.js`): `/start` → pick a pack → **Confirm** / **Back** →
+**Solo** / *Trivia night (disabled)* / **Back** → pick **Hard** / **Standard** / **Casual**
+(each with a one-line description) / **Back**. Each screen is the same ephemeral message
+edited with `interaction.update`. An unfinished setup is dropped after `SETUP_IDLE_MS`.
 
-A button whose `sid` has no live session (bot restarted, game already over) gets an
-ephemeral *"That trivia session expired — run `/start` again."*
+**Starting a run** (`solo.startSolo`): checks the channel has no other public game, builds
+the board (if a grade has no questions it says so and stops), creates the game, players and
+`game_players` rows in the database, edits the ephemeral message to "Game posted in the
+channel 👇" and posts the board. Only the player can press the public game's buttons;
+anyone else gets an ephemeral "This is @Player's game."
 
-Code path: `handleInteraction` → `handleComponent` (switch on `kind`) → `startQuestions` →
-`showQuestion` (Q1, edit) / `postQuestion` (Q2+, send) → `advance`, with
-`onQuestionTimeout` fired by the question timer.
+**The run** (`solo.js`), a session `status` cycle of `board → question → between → board …`:
+
+1. **Board message:** header (pack, player, difficulty, lives, score) and one row of tile
+   buttons per grade, with **Quit** at the end of the last row. Only the lowest grade with
+   unplayed tiles is enabled. A `BOARD_IDLE_MS` timer abandons an untouched board.
+2. **Picking a tile** picks an unused question for it (preferring ones this player has seen
+   least), records it, posts a **fresh question message** and deletes the board.
+   - Choice questions show shuffled `A)`–`D)` options with buttons `A`–`D`. Typed questions
+     show an **Answer** button that opens a modal with one text box.
+   - The message shows its deadline as `<t:UNIX:R>`. A timer (`TIMERS.solo`) is armed for it.
+3. **Answering** (or the timer firing) records the guess, edits the question message to its
+   result with no buttons, waits `timing.resultReadMs`, then posts a fresh board. A miss
+   costs a life.
+4. **The run ends** when the board is cleared (`completed`), lives run out (`failed`),
+   **Quit** is pressed (`quit`) or the board sits idle (`abandoned`). The board is deleted
+   and a fresh summary is posted: result, correct/asked, misses, and for Hard the player's
+   best Hard run.
+
+| | Hard | Standard | Casual |
+|---|---|---|---|
+| Lives | 1 | 3 | unlimited |
+| Cheats (not built yet, Phase 3) | none | 1 per run | unlimited |
+| Stats | counted + own Hard section | counted | saved, not counted |
+
+A button whose `sid` has no live session (bot restarted, game over, setup timed out) gets an
+ephemeral *"That trivia session expired — run `/start` again."* (a modal submit gets
+*"⏰ Too late."*). A click that is for a stale question (an old `seq`) is acknowledged with
+`deferUpdate` and ignored.
 
 ## Replying to Discord
 
-- **Acknowledge every interaction exactly once, within ~3 seconds**, with `reply`, `update`
-  or `deferUpdate`. Acknowledge first and do slow work (posting the lobby, advancing
-  questions) afterwards.
+- **Acknowledge every interaction exactly once, within ~3 seconds**, with `reply`, `update`,
+  `deferUpdate` or `showModal`. Acknowledge first and do slow work (posting the next board)
+  afterwards. The fake client in `scripts/fakes.js` throws on a double acknowledgement.
 - **Ephemeral screens:** open with `interaction.reply({ flags: MessageFlags.Ephemeral, ... })`,
   then move between screens with `interaction.update(...)`, which keeps the message
   ephemeral.
-- **Public messages** (lobby, questions, completion) are sent and edited through the
-  channel by id, using `sendMessage` / `editMessage` in `flow.js`
-  (`client.channels.fetch(id)` → `send` / `messages.edit`). This is because timer callbacks
-  have no interaction to reply with. The session stores `channelId` and `messageId` (the
-  current public message) for this.
-- A button on a public message (Cancel, Yes/No) edits that same message with
-  `interaction.update`.
-- **Message format** is classic `{ content, components }`, with action rows built by
-  `button()` / `row()`. Components V2 is deliberately not used.
+- **Public messages** (board, questions, summary) are sent, edited and deleted through the
+  channel by id with `messages.js` (`client.channels.fetch(id)` → `send` /
+  `messages.edit` / `messages.delete`). This is because timer callbacks have no interaction
+  to reply with. The session stores `channelId` and `messageId` (the current live public
+  message). Every public payload goes out with `allowedMentions: { parse: [] }`, so
+  mentions show as names but never ping. Build them with `publicPayload`.
+- **A fresh message per screen:** each new board or question is a new message at the bottom
+  of the channel. Picking a tile deletes the board; question messages stay as history,
+  edited to show their result.
+- **Modals:** `interaction.showModal` must be the *first* response to the button click, so
+  run the guards synchronously and call it with nothing awaited before it. The submit is a
+  separate interaction (`isModalSubmit()`); answer it with `interaction.update(...)` to edit
+  the question message.
+- **Message format** is classic `{ content, components }`. Components V2 is deliberately not
+  used.
 - **Countdowns** use Discord's `<t:UNIX:R>` timestamp, which counts down on the client.
   Never poll-edit a message to show a countdown.
+- **Limits:** 5 action rows per message, 5 buttons per row; button label ≤ 80 characters;
+  custom_id ≤ 100; message content ≤ 2000 (`publicPayload` clamps it); modal title and
+  input label ≤ 45; select menus ≤ 25 options. Interaction tokens expire after 15 minutes.
+- **Commands are guild-only** (`contexts: [0]`, `integration_types: [0]`).
 - **Discord setup:** the Developer Portal's *Interactions Endpoint URL* must stay
   **empty**. If it is set, Discord sends interactions there instead of to the gateway and
-  every command fails. The bot needs no privileged intents.
+  every command fails. The bot needs no privileged intents, and in the channel it needs
+  to view it and send messages.
 
 ## custom_id scheme
 
-The custom_id is both the router key and the only state a button carries. Build ids only
-with `cid.*` and parse them only with `parseCustomId`. Both live in `constants.js`.
+Every id is `<kind>:<sid>[:<arg>…]`. The custom_id is both the router key and the only
+state a button carries. Build ids only with `cid.*` and parse them only with
+`parseCustomId`, both in `constants.js`. `parseCustomId` returns `{ kind, sid, args }`
+(args are strings), or `{ kind: 'unknown', sid: null, args: [], raw }`.
 
-| `kind` | custom_id | Extra fields |
+| `kind` | Args | Where |
 |---|---|---|
-| `modeSelect` | `mode_select_<key>_<sid>` | `key` |
-| `modeConfirm` | `mode_confirm_<sid>` | — |
-| `modeBack` | `mode_back_<sid>` | — |
-| `soloSelect` | `party_solo_<sid>` | — |
-| `teamsSelect` | `party_teams_<sid>` | — |
-| `partyBack` | `party_back_<sid>` | — |
-| `lobbyStart` | `lobby_start_<sid>` | — |
-| `lobbyCancel` | `lobby_cancel_<sid>` | — |
-| `answer` | `answer_<sid>_<qIndex>_<value>` | `qIndex` (number), `value` (`'yes'` / `'no'`) |
-| `unknown` | anything else | `raw` |
+| `pack` | pack key | setup: pick a pack |
+| `packOk`, `packBack` | — | setup: confirm screen |
+| `fmtSolo`, `fmtNight`, `fmtBack` | — | setup: format screen |
+| `diff` | `hard` / `standard` / `casual` | setup: difficulty screen |
+| `diffBack` | — | setup: difficulty screen |
+| `tile` | tile index | board |
+| `quit` | — | board |
+| `ans` | `seq`, displayed position (0–3) | choice answer |
+| `typed` | `seq` | opens the answer modal |
+| `typedSubmit` | `seq` | the modal's own id |
 
-- `sid` is `crypto.randomUUID()` with the dashes stripped: 32 hex characters and **no
-  underscores**, so ids split cleanly on `_`. Keep it that way.
-- `parseCustomId` splits `mode_select_` ids from the right, so a mode key may contain
-  underscores. The parts of an `answer` id may not.
-- Discord limits a custom_id to 100 characters.
-- **Never put anything in a custom_id that reveals the correct answer.** Players can read
-  custom_ids in their client. DESIGN.md moves to a new `<kind>:<sid>[:<arg>…]` scheme in
-  Phase 2.
+- `sid` is `crypto.randomUUID()` with the dashes stripped: exactly 32 hex characters.
+  Kinds and args must not contain `:` (`cid.*` throws if they do) and an id must fit
+  Discord's 100 characters (it throws if not).
+- `seq` is the question's position in the game. A click whose `seq` isn't the current
+  question is stale: `deferUpdate` and ignore it.
+- Answer buttons carry the **displayed position**, never the choice letter. The session
+  keeps `q.order` (position → index into `question.choices`) to translate. Tiles are
+  referenced by index, never by subject text.
 
-**Adding a button:** add a builder to `cid`, a branch in `parseCustomId` (and update the
-kind list in the comment above it), a `case` in `handleComponent`, a row in the table
-above and a step in `scripts/smoke.js`.
+**Adding a button:** add a builder to `cid`, a `case` in `handleSolo` (or `handleSetup`) and
+`SETUP_KINDS` if it is a setup button, a row in the table above, a test in
+`test/constants.test.js` and a step in `scripts/smoke.js`.
 
 ## Sessions and timers
 
-Created by `createSession` in `state.js`:
+Created by `createSession` in `state.js`, then extended by `solo.startSolo`:
 
 ```js
 {
-  sid, hostId, channelId,
-  mode: null,          // MODES key once picked
-  party: null,         // 'solo' | 'teams' once picked (only 'solo' is ever set today)
-  players: [hostId],   // only the host for now
-  status: 'picking',   // 'picking' | 'lobby' | 'in_progress' | 'complete'
-  questionIndex: 0,
-  answers: [],         // { qIndex, value, correct, timedOut? }
-  messageId: null,     // current public lobby / question message
-  timer: null,         // the single active setTimeout handle
+  sid, guildId, channelId, hostId,   // hostId is the player
+  status,        // 'setup' | 'board' | 'question' | 'between' | 'ending' | 'ended'
+  pack, format, difficulty,   // PACKS key, 'solo', DIFFICULTIES key
+  public,        // true once the session owns the channel's one public game
+  gameId,        // games.id
+  messageId,     // the current live public message
+  timer,         // the single active setTimeout handle
   createdAt,
+  run: {
+    tiles,       // [{ index, grade, subject, state: 'open'|'right'|'wrong'|'skipped' }]
+    usedIds,     // Set of question ids already asked
+    seq,         // next game_questions.seq
+    correct, misses, asked,
+    livesLeft,   // Infinity on Casual
+    q: {         // the question on screen (or the last one answered)
+      seq, gameQuestionId, tileIndex, question,
+      order,     // choice questions: position -> index into question.choices
+      struck,    // positions eliminated (50/50, Phase 3)
+      shownAtMs, deadlineMs, answered,
+    },
+  },
 }
 ```
 
-`state.js` also lists a `'cancelled'` status, but nothing sets it: Cancel deletes the
-session instead.
-
-- **All state is in memory.** A restart drops every session. The bot assumes one process
-  and one active session per channel, but nothing enforces the latter.
-- **One timer per session.** Always arm timers with `armTimer` (`flow.js`). It `unref()`s
-  the handle and stores it with `setTimer`, which clears any previous timer.
-  `clearTimer` / `deleteSession` cancel it. Timer callbacks must `.catch` their promise,
-  because there is no interaction to report errors to.
+- **All state is in memory.** A restart drops every session. At startup `initDb` marks the
+  games that were running as `abandoned`.
+- **One public game per channel**, enforced with `findPublicSession(channelId)` at the
+  moment a game is created. Claim the channel (`session.public = true`) before the first
+  `await`.
+- **One timer per session.** Always arm timers with `armTimer` (`state.js`). It `unref()`s
+  the handle and replaces any previous timer, so each phase arms exactly one. `clearTimer` /
+  `deleteSession` cancel it. Timer callbacks must `.catch` their promise, because there is
+  no interaction to report errors to.
 - **Race rule:** a click and a timer can both fire for the same question. Change session
   state (record the answer, clear the timer) **before the first `await`** in a handler.
-  Both the answer handler and `onQuestionTimeout` check three guards before acting:
-  `status === 'in_progress'`, `qIndex === session.questionIndex`, and no recorded answer
-  for that `qIndex`. Stale or duplicate clicks get a `deferUpdate` and change nothing. Any
-  new timed step needs the same guards.
-- Channel send/edit failures are caught and logged so the game loop keeps going.
+  Answering and `onQuestionTimeout` both go through `openQuestion(session, seq)`, which
+  requires `status === 'question'`, the current `seq` and `!q.answered`, and `settle()`
+  sets `q.answered` and records the guess synchronously. Stale or duplicate clicks get a
+  `deferUpdate` and change nothing. Any new timed step needs the same guards.
+- After any `await` that sends a message, re-check the session is still the live one before
+  touching it (see `postQuestion`).
+- Channel send / edit / delete failures are caught and logged so the game loop keeps going.
+  If the board or a question can't be posted at all, the run is aborted (`abandoned`) and
+  the channel freed.
 
-## Questions and tunables
+## Questions, answers and tunables
 
-- `questions/aystafg.json` is an array of `{ id, prompt, answer }`. `answer` is lowercase
-  `"yes"` or `"no"`, and `checkAnswer` does a strict string compare against the button
-  value.
-- Questions are asked in file order, all of them: `QUESTION_COUNT` is the length of the
-  file. The file is read once at import time, so the bot must be restarted to pick up
-  edits.
-- The two current questions are throwaway placeholders that exercise the correct and
-  incorrect paths.
+- Questions live in the database; see DESIGN.md "Question bank" for the CSV format and the
+  README for how the user loads them. A `choice` question stores `choices` (JSON array) and
+  `answer` (the original letter `A`–`D`); a `typed` question stores the canonical `answer`
+  and optional `accepted` alternatives.
+- Choices are shuffled every time a question is shown. Compare the **original letter**
+  (`LETTERS[q.order[position]]`) against `question.answer`, never the position.
+- `answers.checkTyped` normalises both sides (NFKC, lower-case, whitespace, outer
+  punctuation) and compares numbers as numbers. There is no fuzzy matching.
+- Typed text from players is escaped (`escapeMarkdown`) before it goes into a message.
 
 | Tunable | Where | Value |
 |---|---|---|
-| `QUESTION_TIMEOUT_MS` | `constants.js` | `10_000`: answer window per question |
-| `LOBBY_COUNTDOWN_MS` | `constants.js` | `60_000`: lobby countdown before questions auto-start |
-| `MODES` | `constants.js` | `fifthgrader` (enabled), `trivia2` "Coming Soon" (disabled) |
-| `RESULT_READ_MS` | `flow.js` | `1500`: pause after a result before the next question |
+| `TIMERS.solo.choice` / `.typed` | `constants.js` | 20 s / 45 s answer window |
+| `STANDARD_LIVES` | `constants.js` | 3 |
+| `SETUP_IDLE_MS` | `constants.js` | 15 min: drop an unfinished setup |
+| `BOARD_IDLE_MS` | `constants.js` | 5 min: untouched board → abandoned |
+| `timing.resultReadMs` | `constants.js` | 1500: pause after a result (tests set it to 0) |
+| `DIFFICULTIES`, `PACKS` | `constants.js` | the difficulties and packs |
+
+`constants.js` also defines the later phases' tunables (`TIMERS.night`, `PEEK_MIN_ANSWERS`,
+`SIGNUP_IDLE_MS`, `NIGHT_IDLE_MS`, `LEADERBOARD_MIN_ANSWERS`), which nothing uses yet.
 
 ## Slash commands
 
-`/start` is the only command. It is defined in `commands.js` with `type: 1`,
-`integration_types: [0, 1]` (guild and user install) and `contexts: [0, 1, 2]` (guild, bot
-DM, private channel).
+`/start` is the only command so far. It is defined in `commands.js` with `type: 1`,
+`integration_types: [0]` and `contexts: [0]` (servers only, because games are posted by the
+bot into a channel).
 
 **Adding a command:** define it in `commands.js`, add it to `ALL_COMMANDS`, handle its
-`interaction.commandName` in `handleInteraction` and add a step to `scripts/smoke.js`. Then
-tell the user to run `npm run register`. Global commands can take a few minutes to appear.
+`interaction.commandName` in `handleCommand` (`flow.js`) and add a step to
+`scripts/smoke.js`. Then tell the user to run `npm run register`. Global commands can take
+a few minutes to appear.
 
 ## Known gaps
 
-- Anyone can press Start Now, Cancel or answer. These spots are marked
-  `// TODO: host-only?` in `flow.js`.
-- Sessions abandoned during setup are never cleaned up until the bot restarts.
-- Public messages are sent as the bot, so they only work in channels the bot can access.
-  If the lobby send fails, the error is logged but the user has already been told
-  "Lobby posted".
-- The smoke test only covers the happy path. It does not exercise timeouts, Cancel, Back,
-  Teams or disabled modes.
+- **Cheats are not implemented** (Phase 3): `DIFFICULTIES` already says how many each
+  difficulty gets, but there are no cheat buttons.
+- **Trivia night is not implemented** (Phase 5): its setup button is disabled.
+- **No `/stats` or `/leaderboard`** yet (Phases 4 and 6). Only `bestHardRun` exists.
+- A restart abandons games in progress. Their messages stay in the channel with dead
+  buttons, which answer with the "expired" reply.
+- If the bank changes under a running game (an import deactivates a tile's questions), that
+  tile is marked skipped (➖) and the run continues.
+- The smoke test uses a fake Discord, so it can't catch problems that only the real API
+  shows (permissions, rate limits, a message that was deleted by a moderator).
 
 ## Roadmap
 
 The full design and build plan are in [DESIGN.md](DESIGN.md). It is the spec, so follow it,
 and record any judgment call in its Decisions log. The phases, in order:
 
-1. **Database and question import:** SQLite via `node:sqlite`, CSV import of the private
-   question bank, bundled sample questions.
-2. **Solo board game:** a Fifth Grader grade + subject board, multiple choice and typed
-   answers, Hard / Standard / Casual difficulties, and every guess recorded.
+1. **Database and question import** — done.
+2. **Solo board game** — done.
 3. **Cheats:** Peek, 50/50, Swap, Extra time.
 4. **Stats:** `/stats`.
 5. **Trivia night:** sign-up, teams, rotating answerers, Ask a teammate, host controls.
 6. **Leaderboard and analysis:** `/leaderboard` and saved SQL queries.
-
-**Done so far:** Phase 1. The game flow described above is still the old yes/no flow from
-before Phase 2, and it doesn't use the database yet. Update the sections above as each
-phase lands.

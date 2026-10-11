@@ -1,119 +1,532 @@
-// End-to-end smoke test for the interaction flow WITHOUT Discord.
+// End-to-end smoke test WITHOUT Discord.
 //
-//  - builds a fake discord.js client whose channels record every send / edit
-//  - feeds flow.js:handleInteraction fake interaction objects in sequence, each
-//    recording which reply method (reply / update / deferUpdate) the flow used
+//  - a fake client records every message the bot sends / edits / deletes (scripts/fakes.js)
+//  - fake interactions are fed to flow.js:handleInteraction, each recording which reply
+//    method (reply / update / deferUpdate / showModal) the flow used
+//  - buttons are pressed by looking them up in the messages the bot actually rendered, so
+//    the real custom_ids are exercised
+//  - an in-memory database is checked after each game
 //
-// Run: node scripts/smoke.js
-//
-// Expected: completes cleanly, showing a question send, an answer update, and the
-// final "Trivia complete" send.
+// Run: node scripts/smoke.js   (npm test runs it after the unit tests)
 
 import assert from 'node:assert/strict';
-import { handleInteraction } from '../flow.js';
-import { cid } from '../constants.js';
+import { dropSetup, handleInteraction } from '../flow.js';
+import { onBoardIdle, onQuestionTimeout } from '../solo.js';
+import { cid, parseCustomId, timing } from '../constants.js';
+import { closeDb, getDb, initDb } from '../db.js';
+import { seedSampleQuestions } from '../importer.js';
+import { setRng } from '../rng.js';
+import { getSession, resetSessions } from '../state.js';
+import { componentsOf, createFakeDiscord, makeUser, seededRng } from './fakes.js';
 
-// --- fake client ---------------------------------------------------------
+const CHANNEL = 'chan1';
+const OTHER_CHANNEL = 'chan2';
+const ann = makeUser('1001', 'Ann');
+const ben = makeUser('1002', 'Ben');
 
-const USER = 'user_smoke';
-const CHANNEL = 'chan_smoke';
-const channelCalls = [];
+timing.resultReadMs = 0; // don't wait between questions
 
-const client = {
-  channels: {
-    fetch: async (id) => ({
-      send: async (payload) => {
-        channelCalls.push({ method: 'send', channelId: id, payload });
-        console.log(`  CHANNEL send ${id} ${JSON.stringify(payload.content)}`);
-        return { id: 'msg_' + Math.random().toString(36).slice(2) };
-      },
-      messages: {
-        edit: async (messageId, payload) => {
-          channelCalls.push({ method: 'edit', channelId: id, messageId, payload });
-          console.log(`  CHANNEL edit ${id}/${messageId} ${JSON.stringify(payload.content)}`);
-          return { id: messageId };
-        },
-      },
-    }),
-  },
-};
+let discord;
+let stepNo = 0;
 
-// --- fake interaction builders -------------------------------------------
+// --- harness ---------------------------------------------------------------------------
 
-function fakeInteraction(extra) {
-  const calls = [];
-  const record = (method) => async (payload) => {
-    calls.push({ method, payload });
-  };
-  return {
-    client,
-    user: { id: USER },
-    channelId: CHANNEL,
-    isChatInputCommand: () => false,
-    isButton: () => false,
-    reply: record('reply'),
-    update: record('update'),
-    deferUpdate: record('deferUpdate'),
-    calls,
-    ...extra,
-  };
+function freshWorld(seed = 7) {
+  resetSessions();
+  closeDb();
+  initDb(':memory:');
+  seedSampleQuestions();
+  setRng(seededRng(seed));
+  discord = createFakeDiscord();
+  stepNo = 0;
 }
 
-const command = (name) =>
-  fakeInteraction({ isChatInputCommand: () => true, commandName: name });
-
-const component = (customId) =>
-  fakeInteraction({ isButton: () => true, customId });
-
-// --- driver ----------------------------------------------------------
-
-let stepNo = 0;
-async function step(label, interaction, expectedMethod) {
+// Handle one interaction and check which reply methods the flow used, in order.
+async function send(label, interaction, ...expected) {
   stepNo += 1;
   await handleInteraction(interaction);
   const got = interaction.calls.map((c) => c.method);
-  console.log(`#${stepNo} ${label} -> ${got.join(', ') || 'no reply'} (expected ${expectedMethod})`);
-  assert.deepEqual(got, [expectedMethod], `${label}: reply method`);
+  console.log(`  #${stepNo} ${label} -> ${got.join(', ') || '(no reply)'}`);
+  assert.deepEqual(got, expected, `${label}: reply methods`);
   return interaction;
 }
 
-(async () => {
-  console.log('--- /start ---');
-  const start = await step('/start', command('start'), 'reply');
-  // recover the session id from the first mode-picker button custom_id:
-  //   mode_select_fifthgrader_<sid>
-  const pickerRow = start.calls[0].payload.components[0];
-  const firstCustomId = pickerRow.components[0].custom_id;
-  const sid = firstCustomId.slice('mode_select_fifthgrader_'.length);
-  assert.ok(sid && !sid.includes('_'), 'recovered a clean sid');
-  console.log(`   sid=${sid}`);
+const press = (label, customId, user, ...expected) =>
+  send(label, discord.button(customId, user, { channelId: CHANNEL }), ...expected);
 
-  await step('modeSelect(fifthgrader)', component(cid.modeSelect('fifthgrader', sid)), 'update');
-  await step('modeConfirm', component(cid.modeConfirm(sid)), 'update');
-  await step('soloSelect', component(cid.soloSelect(sid)), 'update');
-  await step('lobbyStart', component(cid.lobbyStart(sid)), 'deferUpdate');
-  await step("answer(q0,'yes')", component(cid.answer(sid, 0, 'yes')), 'update');
-  await step("answer(q1,'no')", component(cid.answer(sid, 1, 'no')), 'update');
+const row = (sql, ...params) => ({ ...getDb().prepare(sql).get(...params) });
+const rows = (sql, ...params) => getDb().prepare(sql).all(...params).map((r) => ({ ...r }));
 
-  // A stale click after the game ended must get the "expired" reply, not throw.
-  await step('stale answer', component(cid.answer(sid, 1, 'no')), 'reply');
+const live = (channelId = CHANNEL) => discord.live(channelId);
+const latest = (channelId = CHANNEL) => discord.latest(channelId);
+const buttons = (message) => componentsOf(message);
+const texts = (channelId = CHANNEL) => live(channelId).map((m) => m.content);
 
-  // --- assertions on the recorded channel traffic ---
-  console.log('\n--- channel calls captured ---');
-  channelCalls.forEach((c, i) => console.log(`  [${i}] ${c.method} ${c.channelId}`));
+// /start -> pack -> confirm -> solo -> difficulty. Returns the session id.
+async function startSolo(difficulty, user = ann, channelId = CHANNEL) {
+  const start = await send('/start', discord.command('start', user, { channelId }), 'reply');
+  const picker = start.calls[0].payload.components[0].components;
+  const sid = parseCustomId(picker[0].custom_id).sid;
+  const go = (label, customId, ...expected) =>
+    send(label, discord.button(customId, user, { channelId }), ...(expected.length ? expected : ['update']));
+  await go('pick pack', cid.pack(sid, 'fifthgrader'));
+  await go('confirm pack', cid.packOk(sid));
+  await go('pick solo', cid.fmtSolo(sid));
+  await go(`pick ${difficulty}`, cid.diff(sid, difficulty));
+  return sid;
+}
 
-  const sent = (re) =>
-    channelCalls.some(
-      (c) => c.method === 'send' && c.channelId === CHANNEL && re.test(String(c.payload.content)),
+// Press the first playable tile on the current board. Returns the question now on screen.
+async function pickTile(sid, user = ann, matcher = () => true) {
+  const board = latest();
+  const tile = buttons(board).find(
+    (b) => parseCustomId(b.custom_id).kind === 'tile' && !b.disabled && matcher(b),
+  );
+  assert.ok(tile, 'a playable tile is on the board');
+  await press(`tile "${tile.label}"`, tile.custom_id, user, 'deferUpdate');
+  return getSession(sid).run.q;
+}
+
+// Answer the question on screen, rightly or wrongly. Choice questions press a button found
+// in the rendered message; typed ones go through the modal.
+async function answer(sid, { correct, user = ann }) {
+  const q = getSession(sid).run.q;
+  const message = latest();
+  if (q.question.type === 'typed') {
+    const open = buttons(message).find((b) => b.custom_id === cid.typed(sid, q.seq));
+    assert.ok(open, 'the Answer button is on the question');
+    await press('Answer (opens modal)', open.custom_id, user, 'showModal');
+    const text = correct ? q.question.answer : 'definitely not it';
+    await send(
+      `modal "${text}"`,
+      discord.modal(cid.typedSubmit(sid, q.seq), user, { text, channelId: CHANNEL, messageId: message.id }),
+      'update',
     );
-  assert.ok(sent(/starting <t:\d+:R>/), 'expected the public lobby send');
-  assert.ok(sent(/\*\*Q2\/\d\*\*/), 'expected a fresh question send');
-  assert.ok(sent(/Trivia complete/), 'expected the final "Trivia complete" send');
+  } else {
+    const correctPosition = q.order.indexOf('ABCD'.indexOf(q.question.answer));
+    const position = correct ? correctPosition : (correctPosition + 1) % q.order.length;
+    const target = buttons(message).find((b) => {
+      const parsed = parseCustomId(b.custom_id);
+      return parsed.kind === 'ans' && Number(parsed.args[1]) === position;
+    });
+    assert.ok(target, 'an answer button for that position exists');
+    await press(`answer ${target.label} (${correct ? 'right' : 'wrong'})`, target.custom_id, user, 'update');
+  }
+}
 
-  console.log('\nsmoke: PASS — lobby send, question send, answer updates, and completion send all seen.');
+// --- scenarios -------------------------------------------------------------------------
+
+async function standardRun() {
+  console.log('\n--- Standard run: typed modal, a miss, a timeout, a full board ---');
+  freshWorld();
+  // Leave only the typed question in grade 1 Math so a modal answer is guaranteed.
+  getDb().prepare('UPDATE questions SET active = 0 WHERE id = -1').run();
+
+  const sid = await startSolo('standard');
+  const board = latest();
+  assert.match(board.content, /Standard/);
+  assert.match(board.content, /❤️❤️❤️/);
+  const tiles = buttons(board).filter((b) => parseCustomId(b.custom_id).kind === 'tile');
+  assert.equal(tiles.length, 10, '5 grades x 2 tiles');
+  assert.deepEqual(
+    tiles.map((b) => !b.disabled),
+    [true, true, false, false, false, false, false, false, false, false],
+    'only grade 1 is playable (climb rule)',
+  );
+  assert.ok(buttons(board).some((b) => b.custom_id === cid.quit(sid)), 'Quit is on the board');
+  assert.equal(board.allowedMentions.parse.length, 0, 'the board pings nobody');
+  assert.equal(getSession(sid).public, true);
+
+  // Someone else can't touch Ann's game.
+  const intruder = await send(
+    "Ben presses Ann's tile",
+    discord.button(tiles[0].custom_id, ben, { channelId: CHANNEL }),
+    'reply',
+  );
+  assert.match(intruder.calls[0].payload.content, /This is <@1001>'s game/);
+
+  // A locked (higher-grade) tile does nothing.
+  const before = live().length;
+  await press('locked grade-2 tile', tiles[2].custom_id, ann, 'deferUpdate');
+  assert.equal(live().length, before, 'nothing was posted');
+
+  // Question 1: grade 1 Math is the typed question. "  TWO. " must match via normalisation.
+  const q1 = await pickTile(sid, ann, (b) => /Math/.test(b.label));
+  assert.equal(q1.question.type, 'typed');
+  assert.equal(discord.messages.get(board.id).deleted, true, 'the board was replaced by the question');
+  const typedOpen = buttons(latest()).find((b) => b.custom_id === cid.typed(sid, q1.seq));
+  assert.ok(typedOpen);
+  const modalCall = await press('Answer', typedOpen.custom_id, ann, 'showModal');
+  assert.equal(modalCall.calls[0].payload.custom_id, cid.typedSubmit(sid, q1.seq));
+  const q1Message = latest();
+  await send(
+    'modal "  TWO. "',
+    discord.modal(cid.typedSubmit(sid, q1.seq), ann, { text: '  TWO. ', channelId: CHANNEL, messageId: q1Message.id }),
+    'update',
+  );
+  assert.match(q1Message.content, /✅ \*\*Correct!\*\*/);
+  assert.equal(buttons(q1Message).length, 0, 'the result has no buttons');
+  assert.match(latest().content, /Score 1\/1/, 'a fresh board follows with the score');
+
+  // A stale click on the first question's old button does nothing.
+  await send('stale click on Q1', discord.button(cid.typed(sid, q1.seq), ann, { channelId: CHANNEL }), 'deferUpdate');
+
+  // Question 2: wrong answer = miss 1.
+  await pickTile(sid);
+  await answer(sid, { correct: false });
+  assert.match(latest().content, /❤️❤️🖤/, 'one life lost');
+
+  // Double-click: both clicks race, only one is processed.
+  const q3 = await pickTile(sid);
+  if (q3.question.type === 'choice') {
+    const id = cid.ans(sid, q3.seq, q3.order.indexOf('ABCD'.indexOf(q3.question.answer)));
+    const first = discord.button(id, ann, { channelId: CHANNEL });
+    const second = discord.button(id, ann, { channelId: CHANNEL });
+    await Promise.all([handleInteraction(first), handleInteraction(second)]);
+    assert.deepEqual(first.calls.map((c) => c.method), ['update']);
+    assert.deepEqual(second.calls.map((c) => c.method), ['deferUpdate'], 'the second click is ignored');
+    console.log('  #- double-click: one update, one deferUpdate');
+  } else {
+    await answer(sid, { correct: true });
+  }
+
+  // Question 4: timeout = miss 2. A late click afterwards is ignored.
+  const q4 = await pickTile(sid);
+  await onQuestionTimeout(discord.client, sid, q4.seq);
+  console.log('  #- question times out');
+  assert.ok(texts().some((t) => /Time's up!/.test(t)), 'timeout result shown');
+  assert.match(latest().content, /❤️🖤🖤/, 'two lives lost');
+  await onQuestionTimeout(discord.client, sid, q4.seq); // timer firing twice changes nothing
+  assert.equal(row('SELECT COUNT(*) AS n FROM guesses WHERE game_question_id = ?', q4.gameQuestionId).n, 1);
+
+  // Answer everything else correctly until the board is cleared.
+  while (getSession(sid)) {
+    await pickTile(sid);
+    await answer(sid, { correct: true });
+  }
+
+  const summary = latest().content;
+  assert.match(summary, /Run complete!/);
+  assert.match(summary, /\*\*8\/10\*\* correct · 2 misses/);
+  assert.equal(getSession(sid), undefined, 'the session is gone');
+
+  // The game and every guess were recorded.
+  const game = row('SELECT * FROM games');
+  assert.equal(game.status, 'completed');
+  assert.equal(game.format, 'solo');
+  assert.equal(game.difficulty, 'standard');
+  assert.equal(game.guild_id, 'guild1');
+  assert.equal(game.host_id, '1001');
+  assert.ok(game.ended_at);
+  const guesses = rows('SELECT * FROM guesses ORDER BY id');
+  assert.equal(guesses.length, 10);
+  assert.equal(guesses.filter((g) => g.correct).length, 8);
+  const timedOut = guesses.filter((g) => g.timed_out);
+  assert.equal(timedOut.length, 1);
+  assert.equal(timedOut[0].answer, null);
+  assert.equal(timedOut[0].response_ms, null);
+  assert.ok(guesses.filter((g) => !g.timed_out).every((g) => g.response_ms >= 0 && g.answer !== null));
+  assert.equal(guesses[0].answer, '  TWO.'.trim(), 'the typed text is stored as typed');
+  assert.equal(row('SELECT COUNT(*) AS n FROM game_questions').n, 10);
+  assert.equal(rows('SELECT DISTINCT seq FROM game_questions').length, 10);
+  assert.equal(row("SELECT display_name FROM players WHERE user_id = '1001'").display_name, 'Ann');
+  assert.equal(row('SELECT COUNT(*) AS n FROM game_players').n, 1);
+
+  // A button from the finished game gets the "expired" reply.
+  const stale = await send('click after the game ended', discord.button(cid.quit(sid), ann, { channelId: CHANNEL }), 'reply');
+  assert.match(stale.calls[0].payload.content, /expired/);
+
+  // The channel is free again.
+  await startSolo('casual');
+  assert.equal(row('SELECT COUNT(*) AS n FROM games').n, 2, 'a new game can start');
+}
+
+async function hardRun() {
+  console.log('\n--- Hard run: the first miss ends it ---');
+  freshWorld(11);
+  const sid = await startSolo('hard');
+  assert.match(latest().content, /❤️/);
+  assert.ok(!/🖤/.test(latest().content));
+  await pickTile(sid);
+  await answer(sid, { correct: false });
+  assert.equal(getSession(sid), undefined, 'the run is over');
+  const summary = latest().content;
+  assert.match(summary, /Run over!/);
+  assert.match(summary, /Best Hard run: \*\*0\*\* correct/);
+  assert.equal(row('SELECT status, difficulty FROM games').status, 'failed');
+  assert.equal(row('SELECT difficulty FROM games').difficulty, 'hard');
+
+  // A second Hard run that gets one right first reports the better best.
+  const sid2 = await startSolo('hard');
+  await pickTile(sid2);
+  await answer(sid2, { correct: true });
+  await pickTile(sid2);
+  await answer(sid2, { correct: false });
+  assert.match(latest().content, /Best Hard run: \*\*1\*\* correct/);
+}
+
+async function standardThirdMissEndsRun() {
+  console.log('\n--- Standard: the third miss ends the run ---');
+  freshWorld(3);
+  const sid = await startSolo('standard');
+  for (let i = 0; i < 3; i++) {
+    await pickTile(sid);
+    await answer(sid, { correct: false });
+  }
+  assert.equal(getSession(sid), undefined);
+  assert.match(latest().content, /Run over!/);
+  assert.match(latest().content, /\*\*0\/3\*\* correct · 3 misses/);
+  assert.equal(row('SELECT status FROM games').status, 'failed');
+}
+
+async function casualRunAndQuit() {
+  console.log('\n--- Casual: no life limit, Quit ---');
+  freshWorld(5);
+  const sid = await startSolo('casual');
+  assert.match(latest().content, /❤️ ∞/);
+  for (let i = 0; i < 4; i++) {
+    await pickTile(sid);
+    await answer(sid, { correct: false });
+  }
+  assert.ok(getSession(sid), 'still going after four misses');
+  const board = latest();
+  await press('Quit', cid.quit(sid), ann, 'deferUpdate');
+  assert.equal(board.deleted, true, 'the board is removed on quit');
+  assert.match(latest().content, /Run ended\./);
+  assert.match(latest().content, /\*\*0\/4\*\* correct · 4 misses/);
+  assert.equal(getSession(sid), undefined);
+  const game = row('SELECT * FROM games');
+  assert.equal(game.status, 'quit');
+  assert.equal(game.difficulty, 'casual');
+  assert.equal(row('SELECT COUNT(*) AS n FROM guesses').n, 4, 'casual guesses are still saved');
+}
+
+async function boardIdle() {
+  console.log('\n--- Board idle: an untouched board is abandoned ---');
+  freshWorld(2);
+  const sid = await startSolo('standard');
+  const board = latest();
+  await onBoardIdle(discord.client, sid);
+  console.log('  #- board idle timer fires');
+  assert.equal(board.deleted, true);
+  assert.match(latest().content, /Run abandoned\./);
+  assert.equal(getSession(sid), undefined);
+  assert.equal(row('SELECT status FROM games').status, 'abandoned');
+  await onBoardIdle(discord.client, sid); // firing again is harmless
+}
+
+async function oneGamePerChannel() {
+  console.log('\n--- One public game per channel ---');
+  freshWorld(4);
+  await startSolo('standard');
+  // Ben tries to start a game in the same channel.
+  const start = await send('Ben: /start', discord.command('start', ben, { channelId: CHANNEL }), 'reply');
+  const sid = parseCustomId(start.calls[0].payload.components[0].components[0].custom_id).sid;
+  const go = (label, customId) => send(label, discord.button(customId, ben, { channelId: CHANNEL }), 'update');
+  await go('Ben: pick pack', cid.pack(sid, 'fifthgrader'));
+  await go('Ben: confirm', cid.packOk(sid));
+  await go('Ben: solo', cid.fmtSolo(sid));
+  const blocked = await send('Ben: pick difficulty', discord.button(cid.diff(sid, 'hard'), ben, { channelId: CHANNEL }), 'reply');
+  assert.match(blocked.calls[0].payload.content, /already running in this channel/);
+  assert.equal(row('SELECT COUNT(*) AS n FROM games').n, 1, 'no second game was created');
+  // ...but another channel is fine.
+  await startSolo('hard', ben, OTHER_CHANNEL);
+  assert.equal(row('SELECT COUNT(*) AS n FROM games').n, 2);
+}
+
+async function setupScreens() {
+  console.log('\n--- Setup screens: Back buttons, unavailable pack, expiry ---');
+  freshWorld(6);
+  const start = await send('/start', discord.command('start', ann, { channelId: CHANNEL }), 'reply');
+  const picker = start.calls[0].payload.components[0].components;
+  const sid = parseCustomId(picker[0].custom_id).sid;
+  assert.equal(start.calls[0].payload.flags, 64, 'the picker is ephemeral');
+  assert.deepEqual(picker.map((b) => b.disabled), [false, true], 'Coming Soon is disabled');
+  const go = (label, customId) => send(label, discord.button(customId, ann, { channelId: CHANNEL }), 'update');
+
+  const unavailable = await go('pick the disabled pack', cid.pack(sid, 'trivia2'));
+  assert.match(unavailable.calls[0].payload.content, /isn't available/);
+  await go('pick pack', cid.pack(sid, 'fifthgrader'));
+  await go('back to the picker', cid.packBack(sid));
+  await go('pick pack again', cid.pack(sid, 'fifthgrader'));
+  const format = await go('confirm', cid.packOk(sid));
+  const formatButtons = format.calls[0].payload.components[0].components;
+  assert.equal(formatButtons.find((b) => b.custom_id === cid.fmtNight(sid)).disabled, true, 'trivia night is not available yet');
+  await go('trivia night (disabled)', cid.fmtNight(sid));
+  await go('solo', cid.fmtSolo(sid));
+  const backToFormat = await go('back from difficulty', cid.diffBack(sid));
+  assert.match(backToFormat.calls[0].payload.content, /Solo or trivia night/);
+  await go('solo again', cid.fmtSolo(sid));
+  await go('back to format', cid.diffBack(sid));
+  await go('back to the pack screen', cid.fmtBack(sid));
+
+  // An abandoned setup is forgotten when its timer fires, and its buttons then say so.
+  dropSetup(sid);
+  console.log('  #- setup timer fires');
+  assert.equal(getSession(sid), undefined);
+  const expired = await send('button on an expired setup', discord.button(cid.packOk(sid), ann, { channelId: CHANNEL }), 'reply');
+  assert.match(expired.calls[0].payload.content, /expired/);
+  const gone = await send('unknown button', discord.button('garbage', ann, { channelId: CHANNEL }), 'reply');
+  assert.match(gone.calls[0].payload.content, /expired/);
+  const ghost = await send('button with no session', discord.button(cid.packOk('0'.repeat(32)), ann, { channelId: CHANNEL }), 'reply');
+  assert.match(ghost.calls[0].payload.content, /expired/);
+  const late = await send('late modal', discord.modal(cid.typedSubmit('0'.repeat(32), 1), ann, { text: 'x', channelId: CHANNEL }), 'reply');
+  assert.match(late.calls[0].payload.content, /Too late/);
+
+  // /start in a DM has no server to play in.
+  const dm = await send('/start with no guild', discord.command('start', ann, { channelId: 'dm', guildId: null }), 'reply');
+  assert.match(dm.calls[0].payload.content, /server/);
+}
+
+async function notEnoughQuestions() {
+  console.log('\n--- Not enough questions to build a board ---');
+  freshWorld(8);
+  getDb().prepare('UPDATE questions SET active = 0 WHERE grade = 3').run();
+  const start = await send('/start', discord.command('start', ann, { channelId: CHANNEL }), 'reply');
+  const sid = parseCustomId(start.calls[0].payload.components[0].components[0].custom_id).sid;
+  const go = (label, customId, method = 'update') => send(label, discord.button(customId, ann, { channelId: CHANNEL }), method);
+  await go('pick pack', cid.pack(sid, 'fifthgrader'));
+  await go('confirm', cid.packOk(sid));
+  await go('solo', cid.fmtSolo(sid));
+  const result = await go('standard', cid.diff(sid, 'standard'));
+  assert.match(result.calls[0].payload.content, /nothing for 3rd grade/);
+  assert.equal(row('SELECT COUNT(*) AS n FROM games').n, 0, 'no game was created');
+  assert.equal(getSession(sid), undefined);
+  assert.equal(live().length, 0, 'nothing was posted');
+}
+
+async function postingFails() {
+  console.log("\n--- The bot can't post in the channel ---");
+  freshWorld(9);
+  discord.failures.send = true;
+  const start = await send('/start', discord.command('start', ann, { channelId: CHANNEL }), 'reply');
+  const sid = parseCustomId(start.calls[0].payload.components[0].components[0].custom_id).sid;
+  const go = (label, customId, ...methods) =>
+    send(label, discord.button(customId, ann, { channelId: CHANNEL }), ...(methods.length ? methods : ['update']));
+  await go('pick pack', cid.pack(sid, 'fifthgrader'));
+  await go('confirm', cid.packOk(sid));
+  await go('solo', cid.fmtSolo(sid));
+  const result = await go('standard', cid.diff(sid, 'standard'), 'update', 'followUp');
+  assert.match(result.calls[1].payload.content, /couldn't post/);
+  assert.equal(getSession(sid), undefined, 'the session was dropped');
+  assert.equal(row('SELECT status FROM games').status, 'abandoned');
+  discord.failures.send = false;
+  await startSolo('standard'); // the channel is free again
+}
+
+async function lateAnswers() {
+  console.log('\n--- Late answers ---');
+  freshWorld(10);
+  getDb().prepare('UPDATE questions SET active = 0 WHERE id = -1').run();
+  const sid = await startSolo('standard');
+  const q = await pickTile(sid, ann, (b) => /Math/.test(b.label));
+  assert.equal(q.question.type, 'typed');
+  const questionMessage = latest();
+  await onQuestionTimeout(discord.client, sid, q.seq);
+  console.log('  #- question times out');
+  // The player submits the modal after the time ran out.
+  await send(
+    'modal after timeout',
+    discord.modal(cid.typedSubmit(sid, q.seq), ann, { text: '2', channelId: CHANNEL, messageId: questionMessage.id }),
+    'reply',
+  );
+  // And presses Answer on the dead question.
+  await send('Answer after timeout', discord.button(cid.typed(sid, q.seq), ann, { channelId: CHANNEL }), 'deferUpdate');
+  assert.equal(row('SELECT COUNT(*) AS n FROM guesses').n, 1, 'only the timeout was recorded');
+}
+
+async function bankChangesMidGame() {
+  console.log('\n--- An import changes the question bank while a game is running ---');
+  freshWorld(12);
+  const sid = await startSolo('standard');
+  const playableTile = () =>
+    buttons(latest()).find((b) => parseCustomId(b.custom_id).kind === 'tile' && !b.disabled);
+
+  // Everything the first Animals tile could ask is switched off underneath the game.
+  getDb().prepare("UPDATE questions SET active = 0 WHERE grade = 1 AND subject = 'Animals'").run();
+  const animals = buttons(latest()).find((b) => b.label === '1st · Animals');
+  const skipped = await press('tile with no questions left', animals.custom_id, ann, 'update');
+  assert.match(skipped.calls[0].payload.components[0].components[0].label, /^➖ 1st · Animals/);
+  assert.equal(getSession(sid).run.tiles[0].state, 'skipped');
+  assert.equal(getSession(sid).status, 'board', 'the run carries on');
+  assert.equal(row('SELECT COUNT(*) AS n FROM guesses').n, 0, 'a skipped tile costs nothing');
+  assert.equal(row('SELECT COUNT(*) AS n FROM game_questions').n, 0);
+
+  // Switch off the rest: every remaining tile is skipped, and the last one ends the run.
+  getDb().prepare('UPDATE questions SET active = 0').run();
+  for (let i = 2; i <= 9; i++) await press(`skip tile ${i}`, playableTile().custom_id, ann, 'update');
+  await press('skip the last tile', playableTile().custom_id, ann, 'deferUpdate');
+  assert.equal(getSession(sid), undefined);
+  assert.match(latest().content, /Run complete!/);
+  assert.match(latest().content, /\*\*0\/0\*\* correct/);
+  assert.equal(row('SELECT status FROM games').status, 'completed');
+}
+
+async function failedAcknowledgements() {
+  console.log('\n--- A failed acknowledgement must not strand a game ---');
+  freshWorld(13);
+  getDb().prepare('UPDATE questions SET active = 0 WHERE id = -1').run(); // grade 1 Math is typed
+  const start = await send('/start', discord.command('start', ann, { channelId: CHANNEL }), 'reply');
+  const sid = parseCustomId(start.calls[0].payload.components[0].components[0].custom_id).sid;
+  const go = (label, customId) => send(label, discord.button(customId, ann, { channelId: CHANNEL }), 'update');
+  await go('pick pack', cid.pack(sid, 'fifthgrader'));
+  await go('confirm', cid.packOk(sid));
+  await go('solo', cid.fmtSolo(sid));
+
+  // The ephemeral update fails, but the board is still posted.
+  await send('standard (update fails)', discord.button(cid.diff(sid, 'standard'), ann, { channelId: CHANNEL, failOn: 'update' }));
+  assert.equal(getSession(sid).status, 'board');
+  assert.ok(buttons(latest()).some((b) => b.custom_id === cid.quit(sid)), 'the board was posted');
+
+  // deferUpdate fails on a tile press, but the question is still posted.
+  const math = buttons(latest()).find((b) => b.label === '1st · Math');
+  await send('tile (deferUpdate fails)', discord.button(math.custom_id, ann, { channelId: CHANNEL, failOn: 'deferUpdate' }));
+  const q = getSession(sid).run.q;
+  assert.equal(getSession(sid).status, 'question');
+  const questionMessage = latest();
+  assert.ok(buttons(questionMessage).some((b) => b.custom_id === cid.typed(sid, q.seq)), 'the question was posted');
+
+  // The modal's update fails: the result is edited in by message id and the next board arrives.
+  await press('Answer', cid.typed(sid, q.seq), ann, 'showModal');
+  await send(
+    'modal (update fails)',
+    discord.modal(cid.typedSubmit(sid, q.seq), ann, {
+      text: q.question.answer,
+      channelId: CHANNEL,
+      messageId: questionMessage.id,
+      failOn: 'update',
+    }),
+  );
+  assert.match(questionMessage.content, /✅ \*\*Correct!\*\*/, 'the result was still shown');
+  assert.equal(getSession(sid).status, 'board', 'and the game went on');
+  assert.equal(row('SELECT COUNT(*) AS n FROM guesses').n, 1);
+
+  // Quit's deferUpdate fails: the run still ends.
+  await send('Quit (deferUpdate fails)', discord.button(cid.quit(sid), ann, { channelId: CHANNEL, failOn: 'deferUpdate' }));
+  assert.equal(getSession(sid), undefined);
+  assert.match(latest().content, /Run ended\./);
+  assert.equal(row('SELECT status FROM games').status, 'quit');
+}
+
+// --- run -------------------------------------------------------------------------------
+
+try {
+  await standardRun();
+  await hardRun();
+  await standardThirdMissEndsRun();
+  await casualRunAndQuit();
+  await boardIdle();
+  await oneGamePerChannel();
+  await setupScreens();
+  await notEnoughQuestions();
+  await postingFails();
+  await lateAnswers();
+  await bankChangesMidGame();
+  await failedAcknowledgements();
+  console.log('\nsmoke: PASS');
   process.exit(0);
-})().catch((err) => {
+} catch (err) {
   console.error('\nsmoke: FAIL');
   console.error(err);
   process.exit(1);
-});
+}

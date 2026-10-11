@@ -1,93 +1,118 @@
-// custom_id scheme + tunables for the trivia flow.
-//
-// A session id (`sid`) is threaded as a suffix on every component custom_id so the
-// router in flow.js can recover which session a click belongs to. `sid` is generated
-// WITHOUT underscores (see state.js — crypto.randomUUID() with dashes stripped), which
-// keeps `answer_<sid>_<qIndex>_<value>` unambiguous to split on "_".
+// Packs, difficulties, tunables and the custom_id scheme (DESIGN.md "Tunables" and
+// "custom_id scheme").
 
-// --- Tunables -------------------------------------------------------------------
-
-export const QUESTION_TIMEOUT_MS = 10_000; // per-question answer window
-export const LOBBY_COUNTDOWN_MS = 60_000; // public lobby countdown before questions auto-start
-
-// Question packs shown in the ephemeral /start picker (DESIGN.md "Terms"). `graded`
-// packs organise their questions by grade 1-5 (the question CSV must give a grade);
-// ungraded packs must leave it empty. Only `enabled` packs can be played.
+// --- Packs -------------------------------------------------------------------------
+// Question packs shown in the ephemeral /start picker. `graded` packs organise their
+// questions by grade 1-5 (the question CSV must give a grade); ungraded packs must leave
+// it empty. Only `enabled` packs can be played.
 export const PACKS = [
   { key: 'fifthgrader', label: 'Are You Smarter Than a Fifth Grader', enabled: true, graded: true },
   { key: 'trivia2', label: 'Coming Soon', enabled: false, graded: false },
 ];
 
-// Old name, used by flow.js until the solo rewrite replaces it.
-export const MODES = PACKS;
+export const GRADES = [1, 2, 3, 4, 5];
+export const TILES_PER_GRADE = 2;
 
-// --- custom_id builders -------------------------------------------------------
-// Every builder takes `sid`. Answer ids also take `qIndex` (0-based question index)
-// and `value` ('yes' | 'no').
+// --- Solo difficulties -----------------------------------------------------------------
+export const STANDARD_LIVES = 3;
 
-export const cid = {
-  modeSelect: (key, sid) => `mode_select_${key}_${sid}`,
-  modeConfirm: (sid) => `mode_confirm_${sid}`,
-  modeBack: (sid) => `mode_back_${sid}`,
-  soloSelect: (sid) => `party_solo_${sid}`,
-  teamsSelect: (sid) => `party_teams_${sid}`,
-  partyBack: (sid) => `party_back_${sid}`,
-  lobbyStart: (sid) => `lobby_start_${sid}`,
-  lobbyCancel: (sid) => `lobby_cancel_${sid}`,
-  answer: (sid, qIndex, value) => `answer_${sid}_${qIndex}_${value}`, // value: 'yes' | 'no'
+// lives / cheats: how many misses end the run, and how many cheats a run may use.
+// `counted`: whether guesses made on this difficulty count toward stats.
+export const DIFFICULTIES = {
+  hard: {
+    key: 'hard',
+    label: 'Hard',
+    lives: 1,
+    cheats: 0,
+    counted: true,
+    blurb: 'One life and no cheats. Your first miss ends the run.',
+  },
+  standard: {
+    key: 'standard',
+    label: 'Standard',
+    lives: STANDARD_LIVES,
+    cheats: 1,
+    counted: true,
+    blurb: `${STANDARD_LIVES} lives and 1 cheat per run.`,
+  },
+  casual: {
+    key: 'casual',
+    label: 'Casual',
+    lives: Infinity,
+    cheats: Infinity,
+    counted: false,
+    blurb: 'Unlimited lives and cheats. Your guesses are saved but don\'t count toward stats.',
+  },
 };
 
-// --- matcher -----------------------------------------------------------------
-// parseCustomId(componentId) -> { kind, sid, ...extra }
+// --- Tunables --------------------------------------------------------------------------
+// Answer windows in ms, by game format and question type.
+export const TIMERS = {
+  solo: { choice: 20_000, typed: 45_000 },
+  night: { choice: 30_000, typed: 60_000 },
+};
+
+export const PEEK_MIN_ANSWERS = 5; // prior counted guesses needed before Peek is offered
+export const SETUP_IDLE_MS = 15 * 60_000; // drop an unfinished ephemeral setup
+export const BOARD_IDLE_MS = 5 * 60_000; // solo board with no tile picked -> abandoned
+export const SIGNUP_IDLE_MS = 30 * 60_000; // night sign-up never started -> cancelled
+export const NIGHT_IDLE_MS = 30 * 60_000; // night with no activity -> abandoned
+export const LEADERBOARD_MIN_ANSWERS = 20; // counted guesses needed to rank by accuracy
+
+// Pauses that tests shrink to zero (smoke.js sets `timing.resultReadMs = 0`).
+export const timing = {
+  resultReadMs: 1500, // how long a result stays on screen before the next board
+};
+
+// --- custom_id scheme -------------------------------------------------------------------
+// Every id is `<kind>:<sid>[:<arg>...]`. The router in flow.js recovers the session from
+// `sid` and what was pressed from `kind`. Players can read ids in their Discord client, so
+// an id must never carry anything that gives away an answer: answer buttons carry the
+// displayed position (0-3), never the original choice letter.
 //
-// kind is one of:
-//   'modeSelect'  -> { key }                 (button in the game-mode picker)
-//   'modeConfirm'                            (Confirm on the confirm screen)
-//   'modeBack'                              (Back on the confirm screen)
-//   'soloSelect'                            (Solo on the solo/teams screen)
-//   'teamsSelect'                           (Teams on the solo/teams screen)
-//   'partyBack'                            (Back on the solo/teams screen)
-//   'lobbyStart'                            (Start Now in the public lobby)
-//   'lobbyCancel'                          (Cancel in the public lobby)
-//   'answer'      -> { qIndex: number, value: 'yes'|'no' }
-//   'unknown'     -> { raw }               (no prefix matched)
+// Kinds and args never contain ':'. `sid` is a crypto.randomUUID() with the dashes
+// removed (32 hex characters, see state.js).
 
-const SIMPLE_PREFIXES = {
-  mode_confirm_: 'modeConfirm',
-  mode_back_: 'modeBack',
-  party_solo_: 'soloSelect',
-  party_teams_: 'teamsSelect',
-  party_back_: 'partyBack',
-  lobby_start_: 'lobbyStart',
-  lobby_cancel_: 'lobbyCancel',
+const SEP = ':';
+const MAX_CUSTOM_ID = 100; // Discord's limit
+const SID_PATTERN = /^[0-9a-f]{32}$/;
+
+function makeId(kind, sid, ...args) {
+  for (const part of [kind, sid, ...args]) {
+    if (String(part).includes(SEP)) throw new Error(`custom_id part contains "${SEP}": ${part}`);
+  }
+  const id = [kind, sid, ...args].join(SEP);
+  if (id.length > MAX_CUSTOM_ID) throw new Error(`custom_id longer than ${MAX_CUSTOM_ID} characters: ${id}`);
+  return id;
+}
+
+const id = (kind) => (sid, ...args) => makeId(kind, sid, ...args);
+
+// Builders, one per kind. A comment gives the args each one takes.
+export const cid = {
+  // setup (ephemeral)
+  pack: id('pack'), //          (sid, packKey)
+  packOk: id('packOk'),
+  packBack: id('packBack'),
+  fmtSolo: id('fmtSolo'),
+  fmtNight: id('fmtNight'),
+  fmtBack: id('fmtBack'),
+  diff: id('diff'), //          (sid, 'hard' | 'standard' | 'casual')
+  diffBack: id('diffBack'),
+  // board + questions (public)
+  tile: id('tile'), //          (sid, tileIndex)
+  quit: id('quit'),
+  ans: id('ans'), //            (sid, seq, displayedPosition)
+  typed: id('typed'), //        (sid, seq): opens the answer modal
+  typedSubmit: id('typedSubmit'), // (sid, seq): the modal's own id
 };
 
+// parseCustomId(componentId) -> { kind, sid, args }. Anything that isn't one of ours, or
+// has a malformed sid, is { kind: 'unknown', sid: null, args: [], raw }.
 export function parseCustomId(componentId) {
-  if (typeof componentId !== 'string' || componentId.length === 0) {
-    return { kind: 'unknown', sid: null, raw: componentId };
-  }
-
-  // answer_<sid>_<qIndex>_<value> — sid/qIndex/value have no underscores, so a
-  // plain 3-way split is safe.
-  if (componentId.startsWith('answer_')) {
-    const [sid, qIndexRaw, value] = componentId.slice('answer_'.length).split('_');
-    return { kind: 'answer', sid, qIndex: Number(qIndexRaw), value };
-  }
-
-  // mode_select_<key>_<sid> — split off sid from the right so `key` may itself
-  // contain underscores if a future mode key needs them.
-  if (componentId.startsWith('mode_select_')) {
-    const rest = componentId.slice('mode_select_'.length);
-    const cut = rest.lastIndexOf('_');
-    if (cut === -1) return { kind: 'unknown', sid: null, raw: componentId };
-    return { kind: 'modeSelect', sid: rest.slice(cut + 1), key: rest.slice(0, cut) };
-  }
-
-  for (const [prefix, kind] of Object.entries(SIMPLE_PREFIXES)) {
-    if (componentId.startsWith(prefix)) {
-      return { kind, sid: componentId.slice(prefix.length) };
-    }
-  }
-
-  return { kind: 'unknown', sid: null, raw: componentId };
+  const unknown = { kind: 'unknown', sid: null, args: [], raw: componentId };
+  if (typeof componentId !== 'string') return unknown;
+  const [kind, sid, ...args] = componentId.split(SEP);
+  if (!Object.hasOwn(cid, kind) || !SID_PATTERN.test(sid ?? '')) return unknown;
+  return { kind, sid, args };
 }

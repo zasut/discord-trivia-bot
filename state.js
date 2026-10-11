@@ -1,33 +1,38 @@
 // In-memory only. Lost on restart. One process.
 //
-// Session store keyed by `sid`. A session tracks everything the flow needs between
-// interactions: chosen mode, party type, players, question progress, and the
-// channel id + message id used to post/edit messages when a timer fires with no
-// interaction in hand. See AGENTS.md "Sessions and timers".
+// Live sessions keyed by `sid`, plus their single timer handle. A session is the whole
+// state of one /start: the ephemeral setup, then (once `public` is true) the game in the
+// channel. Anything that must outlive a restart is written to the database through
+// records.js as it happens. See AGENTS.md "Sessions and timers".
 
 import { randomUUID } from 'node:crypto';
 
 const sessions = new Map();
 
-// sid must have NO underscores so `answer_<sid>_<qIndex>_<value>` stays splittable.
+// sid must have NO colons (ids are `kind:sid:args`) and fit the 32-hex pattern that
+// parseCustomId checks.
 function generateSid() {
   return randomUUID().replace(/-/g, '');
 }
 
-export function createSession({ hostId, channelId }) {
+// Session fields owned here. Game modules add their own (`run` for solo) when they start.
+//   status: 'setup' -> 'board' / 'question' / 'between' / 'ending' (solo) -> 'ended'
+//   public: true once the session owns the channel's one public game
+export function createSession({ guildId, channelId, hostId }) {
   const sid = generateSid();
   const session = {
     sid,
-    hostId,
+    guildId,
     channelId,
-    mode: null, // mode key from constants.MODES once picked
-    party: null, // 'solo' | 'teams' once picked
-    players: [hostId],
-    status: 'picking', // 'picking' | 'lobby' | 'in_progress' | 'complete' | 'cancelled'
-    questionIndex: 0,
-    answers: [], // per-question answer records, shape decided by the game loop
-    messageId: null, // id of the public lobby / question message
-    timer: null, // active setTimeout handle, if any
+    hostId,
+    status: 'setup',
+    pack: null, // PACKS key
+    format: null, // 'solo' | 'night'
+    difficulty: null, // DIFFICULTIES key (solo)
+    public: false,
+    gameId: null, // games.id once the game is created
+    messageId: null, // id of the current live public message
+    timer: null, // the one active setTimeout handle
     createdAt: Date.now(),
   };
   sessions.set(sid, session);
@@ -38,31 +43,51 @@ export function getSession(sid) {
   return sessions.get(sid);
 }
 
-export function updateSession(sid, patch) {
-  const session = sessions.get(sid);
-  if (!session) return undefined;
-  Object.assign(session, patch);
-  return session;
-}
-
 export function deleteSession(sid) {
   const session = sessions.get(sid);
-  if (session && session.timer) clearTimeout(session.timer);
+  if (session?.timer) clearTimeout(session.timer);
   return sessions.delete(sid);
 }
 
-export function setTimer(sid, handle) {
-  const session = sessions.get(sid);
-  if (!session) return undefined;
-  if (session.timer) clearTimeout(session.timer);
-  session.timer = handle;
-  return session;
+// The session that currently owns this channel's public game, if any.
+export function findPublicSession(channelId) {
+  for (const session of sessions.values()) {
+    if (session.public && session.channelId === channelId) return session;
+  }
+  return undefined;
 }
+
+// Test helpers.
+export function allSessions() {
+  return [...sessions.values()];
+}
+
+export function resetSessions() {
+  for (const session of sessions.values()) if (session.timer) clearTimeout(session.timer);
+  sessions.clear();
+}
+
+// --- timers -----------------------------------------------------------------------------
+// A session has ONE timer slot: whatever phase it is in arms exactly one timer, and arming
+// replaces the previous one.
 
 export function clearTimer(sid) {
   const session = sessions.get(sid);
   if (!session) return undefined;
   if (session.timer) clearTimeout(session.timer);
   session.timer = null;
+  return session;
+}
+
+// setTimeout wrapper that stores the handle on the session and unref()s it, so a pending
+// game timer never holds the process open on its own (the gateway connection does that).
+// `fn` must catch its own errors: there is no interaction to report them to.
+export function armTimer(sid, fn, ms) {
+  const session = sessions.get(sid);
+  if (!session) return undefined;
+  if (session.timer) clearTimeout(session.timer);
+  const handle = setTimeout(fn, ms);
+  if (typeof handle.unref === 'function') handle.unref();
+  session.timer = handle;
   return session;
 }
