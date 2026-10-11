@@ -109,6 +109,7 @@ Timings live in `constants.js` (`LOBBY_COUNTDOWN_MS`, `QUESTION_TIMEOUT_MS`).
 | `questions/aystafg.json` | The current question set (Are You Smarter Than A Fifth Grader). |
 | `scripts/smoke.js` | Runs the whole flow locally with a fake Discord client (`node scripts/smoke.js`). Handy after changing `flow.js`. |
 | `AGENTS.md` | Guide for coding agents: architecture, conventions, rules, and what's planned next. |
+| `DESIGN.md` | The planned design (solo boards, trivia nights, stats, database) and the build plan. |
 
 ## Working with `.env`
 

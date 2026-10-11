@@ -2,7 +2,8 @@
 
 Guide for coding agents working in this repo. Human setup and run steps (Developer Portal,
 `.env`, inviting the bot) are in [README.md](README.md). This file covers how the code
-works and how to change it safely.
+works today and how to change it safely. The planned design and the build plan to get
+there are in [DESIGN.md](DESIGN.md).
 
 ## Project
 
@@ -40,11 +41,19 @@ unless they ask.
 - **Smoke test is mandatory.** Run `node scripts/smoke.js` after any change to `flow.js`,
   `state.js`, `constants.js` or `trivia.js`, and report the result. When you add a screen,
   button or command, extend `scripts/smoke.js` to drive it.
+- **`data/` is off-limits too.** Once it exists, it holds the user's private question bank
+  and real stats. Never read or modify it unless asked. Tests use `:memory:` or a temp
+  directory.
 - **No commits unless asked.** Don't `git commit` or `git push` unless the user explicitly
-  asks.
-- **Ask before adding npm dependencies.**
+  asks. Working through DESIGN.md's build plan counts as asking for one commit per phase.
+- **Commit messages** are one short line in the imperative, e.g.
+  `Add solo board game with difficulties`. No body, and no AI attribution (no
+  `Co-Authored-By` trailer, no "Generated with" footer).
+- **Ask before adding npm dependencies.** The DESIGN.md plan needs none: it uses Node
+  built-ins (`node:sqlite`, `node:test`).
 - **Keep this file in sync.** When you change the custom_id scheme, slash commands, session
   shape, tunables or file layout, update the matching section here in the same change.
+  When a DESIGN.md phase lands, tick it there too.
 
 ## Files
 
@@ -59,6 +68,7 @@ unless they ask.
 | `utils.js` | `DiscordRequest` / `InstallGlobalCommands` (REST), used only by `commands.js`. The running bot doesn't use this file. `getRandomEmoji` and `capitalize` are unused leftovers from the Discord example-app template. |
 | `questions/aystafg.json` | Question bank. "aystafg" = **A**re **Y**ou **S**marter **T**han **A** **F**ifth **G**rader. |
 | `scripts/smoke.js` | Offline end-to-end test (see Commands). |
+| `DESIGN.md` | The agreed design (question bank, solo, trivia night, stats, database) and the phased build plan. |
 
 ## Interaction flow
 
@@ -135,6 +145,9 @@ with `cid.*` and parse them only with `parseCustomId`. Both live in `constants.j
 - `parseCustomId` splits `mode_select_` ids from the right, so a mode key may contain
   underscores. The parts of an `answer` id may not.
 - Discord limits a custom_id to 100 characters.
+- **Never put anything in a custom_id that reveals the correct answer.** Players can read
+  custom_ids in their client. DESIGN.md moves to a new `<kind>:<sid>[:<arg>…]` scheme in
+  Phase 2.
 
 **Adding a button:** add a builder to `cid`, a branch in `parseCustomId` (and update the
 kind list in the comment above it), a `case` in `handleComponent`, a row in the table
@@ -217,16 +230,16 @@ tell the user to run `npm run register`. Global commands can take a few minutes 
 
 ## Roadmap
 
-These are directions, not specs. Confirm the design with the user before building any of
-them. In order:
+The full design and build plan are in [DESIGN.md](DESIGN.md). It is the spec, so follow it,
+and record any judgment call in its Decisions log. The phases, in order:
 
-1. **Markdown question bank:** `questions/<mode>.md` with a parser, multiple-choice
-   support and real fifth-grade questions.
-2. **Scoreboard:** persisted wins and correct guesses, both overall and per mode, plus a
-   `/scoreboard` command.
-3. **Teams mode and multiplayer lobby:** players join before the game starts, with team
-   scoring.
+1. **Database and question import:** SQLite via `node:sqlite`, CSV import of the private
+   question bank, bundled sample questions.
+2. **Solo board game:** a Fifth Grader grade + subject board, multiple choice and typed
+   answers, Hard / Standard / Casual difficulties, and every guess recorded.
+3. **Cheats:** Peek, 50/50, Swap, Extra time.
+4. **Stats:** `/stats`.
+5. **Trivia night:** sign-up, teams, rotating answerers, Ask a teammate, host controls.
+6. **Leaderboard and analysis:** `/leaderboard` and saved SQL queries.
 
-Later or undecided: a real second game mode (replacing `trivia2`), `/stop`, `/settings`,
-host-only controls, question shuffling and questions per game. Still open: whether
-`/scoreboard` is public or ephemeral.
+The sections above describe the code before Phase 1. Update them as each phase lands.
