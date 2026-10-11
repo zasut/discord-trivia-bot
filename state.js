@@ -3,7 +3,7 @@
 // Session store keyed by `sid`. A session tracks everything the flow needs between
 // interactions: chosen mode, party type, players, question progress, and the
 // channel id + message id used to post/edit messages when a timer fires with no
-// interaction in hand. See CONTEXT.md §0 / §6.
+// interaction in hand. See AGENTS.md "Sessions and timers".
 
 import { randomUUID } from 'node:crypto';
 

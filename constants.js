@@ -10,7 +10,7 @@
 export const QUESTION_TIMEOUT_MS = 10_000; // per-question answer window
 export const LOBBY_COUNTDOWN_MS = 60_000; // public lobby countdown before questions auto-start
 
-// Game modes shown in the ephemeral picker (CONTEXT.md §6 step 1). Data-driven so
+// Game modes shown in the ephemeral /start picker. Data-driven so
 // flow.js / trivia.js can render buttons from this list. Only `enabled` modes do
 // anything this sprint.
 export const MODES = [

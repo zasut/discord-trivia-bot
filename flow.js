@@ -1,4 +1,4 @@
-// Interaction flow logic for the walking-skeleton MVP (CONTEXT.md §0).
+// Interaction flow logic for the walking-skeleton MVP (AGENTS.md "Interaction flow").
 //
 // app.js is a thin shell: it logs the discord.js client in and hands every
 // `interactionCreate` event to `handleInteraction(interaction)`. Replies use the
@@ -15,10 +15,10 @@
 //
 // Per-question rendering choice: question 0 is produced by editing the public
 // lobby message in place (`showQuestion`). Every subsequent question is posted as
-// a FRESH channel message (`postQuestion`) per the CONTEXT.md §0 step-14
-// recommendation ("a fresh message per question reads better"), updating
-// session.messageId to the new id each time. Answer results and timeouts always
-// edit whatever the current session.messageId is.
+// a FRESH channel message (`postQuestion`) because a fresh message per question
+// reads better in the channel history, updating session.messageId to the new id
+// each time. Answer results and timeouts always edit whatever the current
+// session.messageId is.
 
 import {
   ButtonStyle,
@@ -141,7 +141,7 @@ const staleResponse = (interaction) =>
 
 // --- game-loop helpers (also driven by the timers) ------------------------
 
-// CONTEXT.md §0 step 10 — also called by the lobby countdown timer.
+// Lobby -> first question. Called by Start Now and by the lobby countdown timer.
 export async function startQuestions(client, sid) {
   const session = getSession(sid);
   if (!session) return;
@@ -149,7 +149,7 @@ export async function startQuestions(client, sid) {
   await showQuestion(client, sid, 0);
 }
 
-// CONTEXT.md §0 step 11 — edit the current message into question `qIndex`.
+// Edit the current message into question `qIndex`.
 // Used for question 0 (turns the lobby message into the first question).
 export async function showQuestion(client, sid, qIndex) {
   const session = getSession(sid);
@@ -171,7 +171,7 @@ export async function showQuestion(client, sid, qIndex) {
 }
 
 // Post a fresh channel message for question `qIndex` and re-point the session
-// at it. Used for every question after the first (CONTEXT.md §0 step 14).
+// at it. Used for every question after the first.
 async function postQuestion(client, sid, qIndex) {
   const session = getSession(sid);
   if (!session) return;
@@ -192,7 +192,7 @@ async function postQuestion(client, sid, qIndex) {
   );
 }
 
-// CONTEXT.md §0 step 14 — move on, or finish and tear the session down.
+// Move on to the next question, or finish and tear the session down.
 export async function advance(client, sid, nextIndex) {
   const session = getSession(sid);
   if (!session) return;
@@ -216,7 +216,7 @@ export async function advance(client, sid, nextIndex) {
   deleteSession(sid);
 }
 
-// CONTEXT.md §0 step 13 — fired by the per-question timer. Guarded so a late
+// Fired by the per-question timer. Guarded so a late
 // click that already recorded an answer can't be double-processed.
 export async function onQuestionTimeout(client, sid, qIndex) {
   const session = getSession(sid);
