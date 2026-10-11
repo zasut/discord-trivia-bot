@@ -1,6 +1,7 @@
 // Helpers for tests that need finished games in the database (stats, Peek history).
 // Everything goes through records.js, exactly like a real game.
 
+import { getDb } from '../db.js';
 import { getQuestion } from '../questions.js';
 import {
   addGamePlayer,
@@ -12,6 +13,11 @@ import {
   setTeamResult,
   upsertPlayer,
 } from '../records.js';
+
+// Add a player only if they aren't known yet, so a name a test chose isn't overwritten.
+function ensurePlayer(userId, name = `User ${userId}`) {
+  if (!getDb().prepare('SELECT 1 FROM players WHERE user_id = ?').get(userId)) upsertPlayer(userId, name);
+}
 
 // Record that a question was asked in a game. Returns the game_questions id.
 export function askQuestion(gameId, seq, { questionId, board = 0, pickedBy = null }) {
@@ -33,7 +39,7 @@ export function guessOn(
   gameQuestionId,
   { gameId, questionId, userId, teamId = null, answer = null, correct = false, timedOut = false, responseMs = 1000, assisted = false, assignedUserId = null },
 ) {
-  upsertPlayer(userId, `User ${userId}`);
+  ensurePlayer(userId);
   return recordGuess({
     gameQuestionId,
     gameId,
@@ -85,12 +91,12 @@ export function playSolo({
 //                 index into `teams`
 // Returns { gameId, teamIds }.
 export function playNight({ hostId, guildId = 'guild1', status = 'completed', teams = [], questions = [] }) {
-  upsertPlayer(hostId, `User ${hostId}`);
+  ensurePlayer(hostId);
   const gameId = createGame({ guildId, channelId: 'chan1', pack: 'fifthgrader', format: 'night', hostId });
   const teamIds = teams.map((team, position) => createTeam(gameId, team.name, position));
   teams.forEach((team, index) => {
     team.players.forEach((userId, turnOrder) => {
-      upsertPlayer(userId, `User ${userId}`);
+      ensurePlayer(userId);
       addGamePlayer(gameId, userId, { teamId: teamIds[index], turnOrder });
     });
     setTeamResult(teamIds[index], { score: team.score ?? 0, won: team.won ?? false });
