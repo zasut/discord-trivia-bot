@@ -27,6 +27,28 @@ const STATS_COMMAND = {
   ],
 };
 
-const ALL_COMMANDS = [START_COMMAND, STATS_COMMAND];
+// The top players in this server. Public, so everyone can see it.
+const LEADERBOARD_COMMAND = {
+  name: 'leaderboard',
+  description: "Show this server's trivia leaderboard",
+  type: 1,
+  integration_types: [0],
+  contexts: [0],
+  options: [
+    {
+      name: 'by',
+      description: 'What to rank by (default: accuracy)',
+      type: 3,
+      required: false,
+      choices: [
+        { name: 'Accuracy', value: 'accuracy' },
+        { name: 'Correct answers', value: 'correct' },
+        { name: 'Trivia night wins', value: 'wins' },
+      ],
+    },
+  ],
+};
+
+const ALL_COMMANDS = [START_COMMAND, STATS_COMMAND, LEADERBOARD_COMMAND];
 
 InstallGlobalCommands(process.env.APP_ID, ALL_COMMANDS);

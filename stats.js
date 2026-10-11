@@ -5,7 +5,7 @@
 // counts if it got at least one guess.
 
 import { escapeMarkdown } from 'discord.js';
-import { GRADES } from './constants.js';
+import { GRADES, LEADERBOARD_MIN_ANSWERS } from './constants.js';
 import { getDb } from './db.js';
 import { ordinal } from './board.js';
 import { clamp, mention } from './ui.js';
@@ -215,4 +215,80 @@ export function formatStats(stats, userId) {
     lines.push(`**Trivia nights:** ${parts.join(' · ')}`);
   }
   return clamp(lines.join('\n'));
+}
+
+// --- /leaderboard ------------------------------------------------------------------------
+
+export const LEADERBOARD_BY = ['accuracy', 'correct', 'wins'];
+const LEADERBOARD_SIZE = 10;
+
+// The top players in ONE server (games.guild_id), by:
+//   accuracy  % correct, for players with at least `minAnswers` counted guesses there
+//   correct   total correct answers
+//   wins      trivia-night team wins
+// Returns [{ userId, name, answered, correct, percent }] (accuracy / correct) or
+// [{ userId, name, wins }] (wins), best first. Ties are broken by fewer answers (a higher
+// ratio), then by name, so the order is always the same.
+export function getLeaderboard({ guildId, by = 'accuracy', minAnswers = LEADERBOARD_MIN_ANSWERS }) {
+  const db = getDb();
+
+  if (by === 'wins') {
+    return db
+      .prepare(
+        `SELECT gp.user_id AS userId, p.display_name AS name, COUNT(*) AS wins
+           FROM game_players gp
+           JOIN games gm ON gm.id = gp.game_id
+           JOIN teams t ON t.id = gp.team_id
+           JOIN players p ON p.user_id = gp.user_id
+          WHERE gm.guild_id = ? AND gm.format = 'night' AND t.won = 1
+          GROUP BY gp.user_id
+          ORDER BY wins DESC, p.display_name COLLATE NOCASE, gp.user_id
+          LIMIT ${LEADERBOARD_SIZE}`,
+      )
+      .all(guildId)
+      .map((row) => ({ ...row }));
+  }
+
+  const order =
+    by === 'correct'
+      ? 'correct DESC, answered ASC, p.display_name COLLATE NOCASE, g.user_id'
+      : '1.0 * SUM(g.correct) / COUNT(*) DESC, answered DESC, p.display_name COLLATE NOCASE, g.user_id';
+  const having = by === 'correct' ? '' : 'HAVING COUNT(*) >= ?';
+  const params = by === 'correct' ? [guildId] : [guildId, minAnswers];
+  return db
+    .prepare(
+      `SELECT g.user_id AS userId, p.display_name AS name, COUNT(*) AS answered, SUM(g.correct) AS correct
+         FROM guesses g
+         JOIN games gm ON gm.id = g.game_id
+         JOIN players p ON p.user_id = g.user_id
+        WHERE gm.guild_id = ? AND ${COUNTED}
+        GROUP BY g.user_id
+        ${having}
+        ORDER BY ${order}
+        LIMIT ${LEADERBOARD_SIZE}`,
+    )
+    .all(...params)
+    .map((row) => ({ ...row, percent: percent(row.correct, row.answered) }));
+}
+
+const MEDALS = ['🥇', '🥈', '🥉'];
+const LEADERBOARD_TITLES = { accuracy: 'Accuracy', correct: 'Correct answers', wins: 'Trivia night wins' };
+const LEADERBOARD_EMPTY = {
+  accuracy: (min) => `Nobody in this server has answered ${min} questions yet.`,
+  correct: () => 'Nobody in this server has played yet.',
+  wins: () => 'No trivia night has been won in this server yet.',
+};
+
+// The /leaderboard text, under Discord's 2000-character limit.
+export function formatLeaderboard(rows, by, minAnswers = LEADERBOARD_MIN_ANSWERS) {
+  const title = `🏆 **Leaderboard · ${LEADERBOARD_TITLES[by]}**${by === 'accuracy' ? ` (at least ${minAnswers} answers)` : ''}`;
+  if (rows.length === 0) return `${title}\n${LEADERBOARD_EMPTY[by](minAnswers)}`;
+  const lines = rows.map((row, i) => {
+    const place = MEDALS[i] ?? `${i + 1}.`;
+    const name = escapeMarkdown(row.name);
+    if (by === 'wins') return `${place} ${name} · ${row.wins} ${row.wins === 1 ? 'win' : 'wins'}`;
+    if (by === 'correct') return `${place} ${name} · ${row.correct} correct (${row.percent}% of ${row.answered})`;
+    return `${place} ${name} · ${row.percent}% (${row.correct}/${row.answered})`;
+  });
+  return clamp([title, ...lines].join('\n'));
 }

@@ -64,14 +64,15 @@ script, point it at a scratch file and set `TRIVIA_DB_PATH` to a scratch databas
   in their Discord client.
 - **Keep this file in sync.** When you change the custom_id scheme, slash commands, session
   shape, tunables or file layout, update the matching section here in the same change.
-  When a DESIGN.md phase lands, tick it there too.
+  When a DESIGN.md phase lands, tick it there too. When you change the database schema,
+  check `docs/queries.sql` still works (`test/queries.test.js` will tell you).
 
 ## Files
 
 | File | Role |
 |---|---|
 | `app.js` | Thin shell. Opens the database (seeding the sample questions if it is empty), creates the discord.js `Client` (intent `Guilds` only), logs in and forwards every `InteractionCreate` to `handleInteraction`. If a handler throws, it sends the user an ephemeral error notice. |
-| `flow.js` | `handleInteraction`, the single router for commands, buttons, select menus and modal submits, plus the ephemeral `/start` setup screens and the `/stats` command. |
+| `flow.js` | `handleInteraction`, the single router for commands, buttons, select menus and modal submits, plus the ephemeral `/start` setup screens and the `/stats` and `/leaderboard` commands. |
 | `solo.js` | Solo runs: the board, questions, answers, lives, timers and the end-of-run summary. |
 | `night.js` | Trivia night: sign-up, the team builder, the board, simultaneous questions, Ask a teammate, results, host controls and the final standings. |
 | `teams.js` | Trivia-night team rules: `dealTeams`, `answerOrder`, `currentAnswerer`, `nextPickIndex`, `winningTeams`, `teamLabel`. Pure apart from the rng. |
@@ -85,13 +86,14 @@ script, point it at a scratch file and set `TRIVIA_DB_PATH` to a scratch databas
 | `db.js` | `initDb(path)` / `getDb()` / `closeDb()` / `transaction(fn)`, the numbered migrations and the stale-game cleanup. |
 | `records.js` | Every database write for games: players, games, teams, questions shown, guesses, cheat uses. |
 | `questions.js` | Question queries (reads only): `getQuestion`, `subjectsAvailable`, `pickQuestionForTile`, `hasUnusedQuestion`, `countActiveQuestions`. |
-| `stats.js` | Stats queries (reads only) and the `/stats` text: `getPlayerStats`, `formatStats`, `bestHardRun`, Peek's `peekCount` / `peekAnswers`, and the `COUNTED` SQL condition. |
+| `stats.js` | Stats queries (reads only) and the `/stats` and `/leaderboard` text: `getPlayerStats`, `formatStats`, `getLeaderboard`, `formatLeaderboard`, `bestHardRun`, Peek's `peekCount` / `peekAnswers`, and the `COUNTED` SQL condition. |
 | `importer.js` | `parseQuestions` (validate CSV text), `importQuestions` (upsert), `importFile`, `seedSampleQuestions`. |
 | `csv.js` | RFC 4180 CSV parser, no dependency. |
 | `rng.js` | `random`, `randomInt`, `pick`, `shuffle`. All randomness goes through it so tests can call `setRng(fn)` / `resetRng()`. |
 | `commands.js` | Slash-command definitions. Running it (`npm run register`) pushes them to Discord. |
 | `utils.js` | `DiscordRequest` / `InstallGlobalCommands` (REST), used only by `commands.js`. |
 | `questions/sample.csv` | 20 placeholder questions with negative ids. Loaded automatically when the database has no active questions. |
+| `docs/queries.sql` | 21 numbered, read-only example queries for exploring `data/trivia.db` (see README "Looking at your data"). `test/queries.test.js` runs every one against a seeded database. |
 | `scripts/import-questions.js` | The `npm run import` script. |
 | `scripts/smoke.js` | Offline end-to-end test: whole games driven through `handleInteraction`, then the database checked. |
 | `scripts/fakes.js` | The fake Discord used by the smoke test (and some unit tests): a recording client, interaction builders (with `failOn` to simulate a failed acknowledgement), and `seededRng`. |
@@ -415,19 +417,19 @@ night: {
 | `SIGNUP_IDLE_MS` | `constants.js` | 30 min: a sign-up (or team builder) nobody finishes expires |
 | `NIGHT_IDLE_MS` | `constants.js` | 30 min: a night with nothing pressed between questions → abandoned |
 | `MAX_NIGHT_PLAYERS`, `MIN_TEAMS`, `MAX_TEAMS`, `TEAM_STYLES` | `constants.js` | 25 players, 2–4 teams, their names and colours |
+| `LEADERBOARD_MIN_ANSWERS` | `constants.js` | 20: counted guesses in a server before a player is ranked by accuracy |
 | `timing.resultReadMs` | `constants.js` | 1500: pause after a solo result (tests set it to 0) |
 | `DIFFICULTIES`, `PACKS` | `constants.js` | the difficulties and packs |
-
-`constants.js` also defines `LEADERBOARD_MIN_ANSWERS`, which nothing uses yet.
 
 ## Slash commands
 
 | Command | What it does |
 |---|---|
 | `/start` | Opens the ephemeral setup; see Interaction flow. |
+| `/leaderboard [by]` | The top 10 players **in this server** (`games.guild_id`), as a public message. `by` is `accuracy` (the default; % correct, needs `LEADERBOARD_MIN_ANSWERS` counted guesses in the server), `correct` (right answers) or `wins` (trivia-night team wins). Ties: more answers for accuracy, fewer answers for correct, then name. |
 | `/stats [user] [share]` | A player's stats (default: you) from their counted guesses: overall, by grade, by subject (top 10), Standard and Hard runs, and trivia nights (played, team wins, answered, assists). Private unless `share` is true. A player with no counted guesses and no nights gets "No games yet. Run `/start`!" (or "@name hasn't played yet."). |
 
-Both are defined in `commands.js` with `type: 1`, `integration_types: [0]` and
+All three are defined in `commands.js` with `type: 1`, `integration_types: [0]` and
 `contexts: [0]` (servers only, because games are posted by the bot into a channel).
 
 **Adding a command:** define it in `commands.js`, add it to `ALL_COMMANDS`, handle its
@@ -437,7 +439,6 @@ a few minutes to appear.
 
 ## Known gaps
 
-- **No `/leaderboard`** yet (Phase 6).
 - Solo's Quit only exists on the board, so a player in the middle of a question can't quit
   until it is answered or times out. The same goes for a night's **End night**.
 - A trivia night's teams are fixed at Start: nobody can join late, leave, or switch teams,
@@ -459,5 +460,8 @@ and record any judgment call in its Decisions log. The phases, in order:
 3. **Cheats** (Peek, 50/50, Swap, Extra time) — done.
 4. **Stats:** `/stats` — done.
 5. **Trivia night** (sign-up, teams, rotating answerers, Ask a teammate, host controls) — done.
+6. **Leaderboard and analysis** (`/leaderboard`, `docs/queries.sql`) — done.
+
+All six phases are built. Ideas the design leaves for later: another pack (the `trivia2` placeholder), a `/stop` or `/settings` command, shuffling or limiting questions per game, letting a night's teams change after Start, and caching or indexing if the database ever gets large.
 5. **Trivia night:** sign-up, teams, rotating answerers, Ask a teammate, host controls.
 6. **Leaderboard and analysis:** `/leaderboard` and saved SQL queries.

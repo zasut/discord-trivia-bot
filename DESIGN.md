@@ -3,8 +3,9 @@
 The agreed design for the trivia bot, plus a build plan for implementing it. [AGENTS.md](AGENTS.md)
 describes the code as it is today. This file describes where it is going.
 
-**Status:** nothing in this document is built yet unless its phase is ticked in the
-[Build plan](#build-plan).
+**Status:** all six phases of the [Build plan](#build-plan) are built. This document is now
+the design reference, and the Decisions log at the end records the judgment calls made while
+building it.
 
 ## Vision
 
@@ -615,15 +616,15 @@ Commit: `Add trivia night with teams`
 
 ### Phase 6: Leaderboard and analysis
 
-- [ ] `/leaderboard [by]`.
-- [ ] `docs/queries.sql` with commented example queries:
+- [x] `/leaderboard [by]`.
+- [x] `docs/queries.sql` with commented example queries:
   - per-player average correct per run
   - per-question accuracy and guess distribution (hardest and easiest questions)
   - accuracy by grade and by subject
   - average answer time
   - trivia-night team results
   - Ask a teammate outcomes
-- [ ] README: how to open `data/trivia.db` in DB Browser for SQLite and run the queries.
+- [x] README: how to open `data/trivia.db` in DB Browser for SQLite and run the queries.
 
 Commit: `Add leaderboard and analysis queries`
 
@@ -751,3 +752,20 @@ for every judgment call they make during implementation.
   "Only the host can do that." rather than a silent no-op.
 - Phase 5: the host may pick a tile for any team at any time, as in the design, and the
   host may also be a player.
+- Phase 6: leaderboards read their own server's games only (`games.guild_id`), while
+  `/stats` follows a player across servers. Names come from `players.display_name` (the
+  last name the bot saw), not live mentions, so they still read well if someone leaves.
+- Phase 6: accuracy ties go to the player with more answers (the same ratio over a bigger
+  sample); correct-answers ties go to the player with fewer answers (a better ratio); both
+  fall back to name, then user id, so the order never changes between runs.
+- Phase 6: `wins` counts nights the player's team won. A night with no winner, a quit night
+  and an abandoned night give nobody a win.
+- Phase 6: an unknown `by` value falls back to accuracy rather than erroring.
+- Phase 6: `docs/queries.sql` has 21 numbered read-only queries. Each starts with
+  `-- N. title` and ends with a semicolon, so `test/queries.test.js` can run them one by one
+  against a seeded database and check real numbers, which keeps them working when the
+  schema changes. Query 6 (one question's guess distribution) needs its question id
+  edited by hand.
+- Phase 6: queries leave Casual guesses out by default, with the condition shown at the top
+  of the file, but a few exploratory ones (guess distribution, wrong-answer pull, timeouts)
+  deliberately include them, because that data is still genuine answers.

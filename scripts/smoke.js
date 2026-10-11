@@ -1264,6 +1264,62 @@ async function nightFailedAcknowledgements() {
   assert.deepEqual(buttons(latest()).map((b) => b.label), ['Next ▶', 'End night']);
 }
 
+// --- leaderboard -------------------------------------------------------------------------
+
+async function leaderboardCommand() {
+  console.log('\n--- /leaderboard ---');
+  freshWorld(51);
+  const run = (by, user = ann, guildId = 'guild1') =>
+    send(`/leaderboard ${by ?? ''}`.trim(), discord.command('leaderboard', user, { channelId: CHANNEL, guildId, options: by ? { by } : {} }), 'reply');
+  const guesses = (total, rightCount) =>
+    Array.from({ length: total }, (_, i) => ({ questionId: -1, answer: 'B', correct: i < rightCount }));
+
+  const empty = await run();
+  assert.equal(empty.calls[0].payload.flags, undefined, 'the leaderboard is public');
+  assert.deepEqual(empty.calls[0].payload.allowedMentions, { parse: [] });
+  assert.match(empty.calls[0].payload.content, /Nobody in this server has answered 20 questions yet\./);
+
+  // Ann 20/25 and Ben 20/22 in this server, Cat 30/30 in another one.
+  playSolo({ userId: ann.id, name: 'Ann', guesses: guesses(25, 20) });
+  playSolo({ userId: ben.id, name: 'Ben', guesses: guesses(22, 20) });
+  playSolo({ userId: cat.id, name: 'Cat', guildId: 'guild2', guesses: guesses(30, 30) });
+
+  const accuracy = await run();
+  assert.equal(
+    accuracy.calls[0].payload.content,
+    ['🏆 **Leaderboard · Accuracy** (at least 20 answers)', '🥇 Ben · 91% (20/22)', '🥈 Ann · 80% (20/25)'].join('\n'),
+  );
+  const same = await run('accuracy');
+  assert.equal(same.calls[0].payload.content, accuracy.calls[0].payload.content);
+  const correct = await run('correct');
+  assert.equal(
+    correct.calls[0].payload.content,
+    ['🏆 **Leaderboard · Correct answers**', '🥇 Ben · 20 correct (91% of 22)', '🥈 Ann · 20 correct (80% of 25)'].join('\n'),
+  );
+
+  const none = await run('wins');
+  assert.match(none.calls[0].payload.content, /No trivia night has been won in this server yet\./);
+  // Play (and win) a real trivia night: Ann's team scores, then the host ends it.
+  const sid = await startNight([[ann], [ben]]);
+  await pickNightTile(sid);
+  await everyoneAnswers(sid, [true, false]);
+  await press('End night', cid.endNight(sid), hank, 'update');
+  const wins = await run('wins');
+  assert.equal(wins.calls[0].payload.content, ['🏆 **Leaderboard · Trivia night wins**', '🥇 Ann · 1 win'].join('\n'));
+
+  // Another server has its own board, and an unknown `by` falls back to accuracy.
+  const other = await run('correct', cat, 'guild2');
+  assert.match(other.calls[0].payload.content, /🥇 Cat · 30 correct \(100% of 30\)/);
+  assert.ok(!other.calls[0].payload.content.includes('Ann'));
+  const odd = await run('banana');
+  assert.match(odd.calls[0].payload.content, /Leaderboard · Accuracy/);
+
+  // Not in a server.
+  const dm = await send('/leaderboard in a DM', discord.command('leaderboard', ann, { channelId: 'dm', guildId: null }), 'reply');
+  assert.equal(dm.calls[0].payload.flags, 64);
+  assert.match(dm.calls[0].payload.content, /per server/);
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
@@ -1287,6 +1343,7 @@ try {
   await triviaNight();
   await nightEndings();
   await nightFailedAcknowledgements();
+  await leaderboardCommand();
   console.log('\nsmoke: PASS');
   process.exit(0);
 } catch (err) {

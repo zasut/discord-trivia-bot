@@ -10,7 +10,7 @@ import { DIFFICULTIES, PACKS, SETUP_IDLE_MS, cid, parseCustomId } from './consta
 import { armTimer, createSession, deleteSession, getSession } from './state.js';
 import { handleNight, openSignup } from './night.js';
 import { handleSolo, startSolo } from './solo.js';
-import { formatStats, getPlayerStats } from './stats.js';
+import { LEADERBOARD_BY, formatLeaderboard, formatStats, getLeaderboard, getPlayerStats } from './stats.js';
 import { NO_PINGS, button, mention, row } from './ui.js';
 
 const EPHEMERAL = MessageFlags.Ephemeral;
@@ -142,9 +142,22 @@ async function statsCommand(interaction) {
   });
 }
 
+// /leaderboard [by]: this server's top players. Public.
+async function leaderboardCommand(interaction) {
+  const requested = interaction.options.getString('by') ?? 'accuracy';
+  const by = LEADERBOARD_BY.includes(requested) ? requested : 'accuracy';
+  if (!interaction.guildId) {
+    await interaction.reply({ flags: EPHEMERAL, content: 'The leaderboard is per server. Use `/leaderboard` in one.' });
+    return;
+  }
+  const rows = getLeaderboard({ guildId: interaction.guildId, by });
+  await interaction.reply({ content: formatLeaderboard(rows, by), allowedMentions: NO_PINGS });
+}
+
 async function handleCommand(interaction) {
   if (interaction.commandName === 'start') return startCommand(interaction);
   if (interaction.commandName === 'stats') return statsCommand(interaction);
+  if (interaction.commandName === 'leaderboard') return leaderboardCommand(interaction);
   console.error(`unknown command: ${interaction.commandName}`);
   return interaction.reply({ flags: EPHEMERAL, content: "I don't know that command." });
 }

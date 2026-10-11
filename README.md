@@ -194,8 +194,36 @@ Every guess is saved, so there is a lot to look at. `/stats` shows a player's nu
   your trivia nights.
 - **Casual games don't count**, and a timeout counts as a wrong answer.
 
+`/leaderboard` shows the top 10 players **in this server**, as a public message:
+
+- `/leaderboard` ranks by **accuracy** (% correct, for players with at least 20 answers in
+  the server), `/leaderboard by:Correct answers` by the number of right answers, and
+  `/leaderboard by:Trivia night wins` by team wins.
+- Stats follow a player everywhere, but each leaderboard only counts games played in its own
+  server.
+
 If you updated from an earlier version, run `npm run register` again so Discord learns about
-`/stats`.
+`/stats` and `/leaderboard`.
+
+## Looking at your data
+
+Everything is in one file, `data/trivia.db`, and every answer ever given is a row in it, so
+you can ask questions the bot doesn't: which questions are too easy, which wrong answer
+tempts people most, whether going first helps a team, whether Ask a teammate pays off.
+
+1. Install [DB Browser for SQLite](https://sqlitebrowser.org/) (free).
+2. **File → Open Database Read Only**, and pick `data/trivia.db`. Read-only is safest while the
+   bot is running (the database is in WAL mode, so the bot's `trivia.db-wal` file next to it
+   holds the most recent games: leave it there).
+3. Open the **Execute SQL** tab, paste a query from [`docs/queries.sql`](docs/queries.sql), and
+   press **Ctrl+Return**. The file has 21 ready-made, commented queries; paste **one at a
+   time**. **Browse Data** shows any table as a spreadsheet, and results can be exported to
+   CSV for Excel or Google Sheets.
+
+The main tables are `guesses` (one row per answer: who, which question, what they picked, right
+or wrong, how long it took, whether a teammate helped), `games`, `teams`, `questions` and
+`cheat_uses`. Guesses from Casual runs are saved too, flagged by their game's difficulty;
+the queries show how to leave them out, as the stats do.
 
 ## Project layout
 
@@ -215,10 +243,11 @@ If you updated from an earlier version, run `npm run register` again so Discord 
 | `utils.js` | Small helpers for the Discord REST API (used to register commands). |
 | `db.js` | Opens the SQLite database and applies schema migrations. |
 | `records.js` | Saves players, games, questions asked, guesses and cheat uses. |
-| `stats.js` | The stats queries and the text of `/stats`. |
+| `stats.js` | The stats queries and the text of `/stats` and `/leaderboard`. |
 | `importer.js`, `csv.js` | Check a question CSV and load it into the database. |
 | `questions.js` | Looks questions up in the database. |
 | `rng.js` | All randomness, so tests can make it predictable. |
+| `docs/queries.sql` | Ready-made SQL queries for exploring `data/trivia.db`. |
 | `questions/sample.csv` | 20 placeholder questions used when you haven't imported your own. |
 | `scripts/import-questions.js` | `npm run import`: loads your question CSV. |
 | `scripts/smoke.js`, `scripts/fakes.js`, `scripts/testdata.js` | Plays whole games locally against a fake Discord (`node scripts/smoke.js`), with helpers for test data. |

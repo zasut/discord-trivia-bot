@@ -1,9 +1,16 @@
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { closeDb, initDb } from '../db.js';
-import { seedSampleQuestions } from '../importer.js';
-import { importQuestions } from '../importer.js';
-import { bestHardRun, formatStats, getPlayerStats, peekAnswers, peekCount } from '../stats.js';
+import { importQuestions, seedSampleQuestions } from '../importer.js';
+import {
+  bestHardRun,
+  formatLeaderboard,
+  formatStats,
+  getLeaderboard,
+  getPlayerStats,
+  peekAnswers,
+  peekCount,
+} from '../stats.js';
 import { playNight, playSolo } from '../scripts/testdata.js';
 
 beforeEach(() => {
@@ -388,5 +395,178 @@ describe('trivia night stats', () => {
   test('players without a night have no night line', () => {
     playSolo({ userId: 'u1', guesses: [right(-1)] });
     assert.ok(!formatStats(getPlayerStats('u1'), 'u1').includes('Trivia nights'));
+  });
+});
+
+// ---- /leaderboard -----------------------------------------------------------------------
+
+// `total` guesses on sample question -1, `correctCount` of them right, as one game.
+function play(userId, name, total, correctCount, extra = {}) {
+  return playSolo({
+    userId,
+    name,
+    guesses: Array.from({ length: total }, (_, i) => (i < correctCount ? right(-1) : wrong(-1))),
+    ...extra,
+  });
+}
+
+// Server g1: Ann 20/25, Ben 20/22, Cat 24/30, Dan 10/10 (too few for accuracy), Eve a Casual
+// run of 40/40 (never counts). Server g2: Fay 50/50.
+function playLeaderboardFixture() {
+  play('u1', 'Ann', 25, 20, { guildId: 'g1' });
+  play('u2', 'Ben', 22, 20, { guildId: 'g1' });
+  play('u3', 'Cat', 30, 24, { guildId: 'g1' });
+  play('u4', 'Dan', 10, 10, { guildId: 'g1' });
+  play('u5', 'Eve', 40, 40, { guildId: 'g1', difficulty: 'casual' });
+  play('u6', 'Fay', 50, 50, { guildId: 'g2' });
+}
+
+describe('getLeaderboard', () => {
+  test('accuracy ranks by % correct, for players with enough answers in this server', () => {
+    playLeaderboardFixture();
+    const rows = getLeaderboard({ guildId: 'g1', by: 'accuracy' });
+    assert.deepEqual(
+      rows.map((r) => [r.name, r.answered, r.correct, r.percent]),
+      [
+        ['Ben', 22, 20, 91],
+        ['Cat', 30, 24, 80], // 80% like Ann, but more answers
+        ['Ann', 25, 20, 80],
+      ],
+      'Dan has under 20 answers, Eve only played Casual, Fay is in another server',
+    );
+  });
+
+  test('accuracy is the default and the minimum is adjustable', () => {
+    playLeaderboardFixture();
+    assert.deepEqual(getLeaderboard({ guildId: 'g1' }).map((r) => r.name), ['Ben', 'Cat', 'Ann']);
+    assert.deepEqual(
+      getLeaderboard({ guildId: 'g1', by: 'accuracy', minAnswers: 10 }).map((r) => r.name),
+      ['Dan', 'Ben', 'Cat', 'Ann'],
+    );
+    assert.deepEqual(getLeaderboard({ guildId: 'g1', by: 'accuracy', minAnswers: 100 }), []);
+  });
+
+  test('correct ranks by total right answers, fewer answers winning a tie', () => {
+    playLeaderboardFixture();
+    assert.deepEqual(
+      getLeaderboard({ guildId: 'g1', by: 'correct' }).map((r) => [r.name, r.correct, r.answered]),
+      [['Cat', 24, 30], ['Ben', 20, 22], ['Ann', 20, 25], ['Dan', 10, 10]],
+      'no minimum for this one, and Eve (Casual) and Fay (other server) are out',
+    );
+  });
+
+  test('each server has its own board', () => {
+    playLeaderboardFixture();
+    assert.deepEqual(getLeaderboard({ guildId: 'g2', by: 'correct' }).map((r) => r.name), ['Fay']);
+    assert.deepEqual(getLeaderboard({ guildId: 'g3', by: 'correct' }), []);
+  });
+
+  test("a player's answers in different servers are not added together", () => {
+    play('u1', 'Ann', 5, 5, { guildId: 'g1' });
+    play('u1', 'Ann', 7, 6, { guildId: 'g2' });
+    assert.equal(getLeaderboard({ guildId: 'g1', by: 'correct' })[0].correct, 5);
+    assert.equal(getLeaderboard({ guildId: 'g2', by: 'correct' })[0].correct, 6);
+  });
+
+  test('timeouts count as answers, so they lower accuracy', () => {
+    playSolo({ userId: 'u1', name: 'Ann', guildId: 'g1', guesses: [...Array(10).fill(right(-1)), ...Array(10).fill(timeout(-1))] });
+    assert.deepEqual(getLeaderboard({ guildId: 'g1' }).map((r) => [r.answered, r.correct, r.percent]), [[20, 10, 50]]);
+  });
+
+  test('shows at most the top ten', () => {
+    for (let i = 1; i <= 12; i++) play(`p${i}`, `Player ${String(i).padStart(2, '0')}`, 20, i, { guildId: 'g1' });
+    const rows = getLeaderboard({ guildId: 'g1', by: 'correct' });
+    assert.equal(rows.length, 10);
+    assert.deepEqual(rows.map((r) => r.correct), [12, 11, 10, 9, 8, 7, 6, 5, 4, 3]);
+  });
+
+  test('night answers count toward accuracy and correct, in the night’s server', () => {
+    playNight({
+      hostId: 'h1',
+      guildId: 'g1',
+      teams: [
+        { name: 'Red', score: 20, won: true, players: ['u1'] },
+        { name: 'Blue', score: 0, players: ['u2'] },
+      ],
+      questions: Array.from({ length: 20 }, () => ({
+        questionId: -1,
+        guesses: [
+          { team: 0, userId: 'u1', answer: 'B', correct: true },
+          { team: 1, userId: 'u2', answer: 'A', correct: false },
+        ],
+      })),
+    });
+    assert.deepEqual(getLeaderboard({ guildId: 'g1' }).map((r) => [r.userId, r.percent]), [['u1', 100], ['u2', 0]]);
+    assert.deepEqual(getLeaderboard({ guildId: 'g2' }), []);
+  });
+
+  test('wins ranks trivia-night team wins in this server only', () => {
+    const night = (guildId, red, blue, winner) =>
+      playNight({
+        hostId: 'h1',
+        guildId,
+        teams: [
+          { name: 'Red', score: 1, won: winner === 'red', players: red },
+          { name: 'Blue', score: 1, won: winner === 'blue', players: blue },
+        ],
+      });
+    night('g1', ['u1', 'u2'], ['u3'], 'red');
+    night('g1', ['u1', 'u2'], ['u3'], 'red');
+    night('g1', ['u3'], ['u1'], 'red');
+    night('g1', ['u4'], ['u5'], null); // nobody won
+    night('g2', ['u9'], ['u8'], 'blue');
+    const rows = getLeaderboard({ guildId: 'g1', by: 'wins' });
+    assert.deepEqual(rows.map((r) => [r.userId, r.wins]), [['u1', 2], ['u2', 2], ['u3', 1]]);
+    assert.deepEqual(getLeaderboard({ guildId: 'g2', by: 'wins' }).map((r) => r.userId), ['u8']);
+  });
+
+  test('solo games have no wins', () => {
+    playLeaderboardFixture();
+    assert.deepEqual(getLeaderboard({ guildId: 'g1', by: 'wins' }), []);
+  });
+});
+
+describe('formatLeaderboard', () => {
+  test('accuracy: medals for the top three, then numbers', () => {
+    playLeaderboardFixture();
+    play('u7', 'Gus', 20, 12, { guildId: 'g1' });
+    assert.equal(
+      formatLeaderboard(getLeaderboard({ guildId: 'g1' }), 'accuracy'),
+      [
+        '🏆 **Leaderboard · Accuracy** (at least 20 answers)',
+        '🥇 Ben · 91% (20/22)',
+        '🥈 Cat · 80% (24/30)',
+        '🥉 Ann · 80% (20/25)',
+        '4. Gus · 60% (12/20)',
+      ].join('\n'),
+    );
+  });
+
+  test('correct and wins have their own lines', () => {
+    playLeaderboardFixture();
+    assert.equal(
+      formatLeaderboard(getLeaderboard({ guildId: 'g1', by: 'correct' }).slice(0, 2), 'correct'),
+      ['🏆 **Leaderboard · Correct answers**', '🥇 Cat · 24 correct (80% of 30)', '🥈 Ben · 20 correct (91% of 22)'].join('\n'),
+    );
+    assert.equal(
+      formatLeaderboard([{ name: 'Ann', wins: 3 }, { name: 'Ben', wins: 1 }], 'wins'),
+      ['🏆 **Leaderboard · Trivia night wins**', '🥇 Ann · 3 wins', '🥈 Ben · 1 win'].join('\n'),
+    );
+  });
+
+  test('says so when there is nobody to show', () => {
+    assert.equal(
+      formatLeaderboard([], 'accuracy'),
+      '🏆 **Leaderboard · Accuracy** (at least 20 answers)\nNobody in this server has answered 20 questions yet.',
+    );
+    assert.match(formatLeaderboard([], 'correct'), /Nobody in this server has played yet\./);
+    assert.match(formatLeaderboard([], 'wins'), /No trivia night has been won in this server yet\./);
+  });
+
+  test('names cannot inject markdown, and the text stays under 2000 characters', () => {
+    const rows = Array.from({ length: 10 }, (_, i) => ({ userId: `u${i}`, name: `**${'x'.repeat(40)}**`, answered: 99999, correct: 99999, percent: 100 }));
+    const text = formatLeaderboard(rows, 'accuracy');
+    assert.ok(text.includes('\\*\\*'));
+    assert.ok(text.length <= 2000);
   });
 });
