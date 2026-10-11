@@ -9,7 +9,8 @@ import { ButtonStyle, MessageFlags } from 'discord.js';
 import { DIFFICULTIES, PACKS, SETUP_IDLE_MS, cid, parseCustomId } from './constants.js';
 import { armTimer, createSession, deleteSession, getSession } from './state.js';
 import { handleSolo, startSolo } from './solo.js';
-import { button, row } from './ui.js';
+import { formatStats, getPlayerStats } from './stats.js';
+import { NO_PINGS, button, mention, row } from './ui.js';
 
 const EPHEMERAL = MessageFlags.Ephemeral;
 
@@ -124,8 +125,26 @@ async function startCommand(interaction) {
   });
 }
 
+// /stats [user] [share]: private unless `share` is true.
+async function statsCommand(interaction) {
+  const target = interaction.options.getUser('user') ?? interaction.user;
+  const share = interaction.options.getBoolean('share') ?? false;
+  const stats = getPlayerStats(target.id);
+  let content = formatStats(stats, target.id);
+  if (!stats.hasData) {
+    content =
+      target.id === interaction.user.id ? 'No games yet. Run `/start`!' : `${mention(target.id)} hasn't played yet.`;
+  }
+  await interaction.reply({
+    content,
+    allowedMentions: NO_PINGS,
+    ...(share ? {} : { flags: EPHEMERAL }),
+  });
+}
+
 async function handleCommand(interaction) {
   if (interaction.commandName === 'start') return startCommand(interaction);
+  if (interaction.commandName === 'stats') return statsCommand(interaction);
   console.error(`unknown command: ${interaction.commandName}`);
   return interaction.reply({ flags: EPHEMERAL, content: "I don't know that command." });
 }

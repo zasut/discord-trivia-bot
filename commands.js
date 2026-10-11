@@ -14,6 +14,19 @@ const START_COMMAND = {
   contexts: [0],
 };
 
-const ALL_COMMANDS = [START_COMMAND];
+// Show a player's stats. Private unless `share` is set.
+const STATS_COMMAND = {
+  name: 'stats',
+  description: 'Show trivia stats',
+  type: 1,
+  integration_types: [0],
+  contexts: [0],
+  options: [
+    { name: 'user', description: 'Whose stats to show (default: you)', type: 6, required: false },
+    { name: 'share', description: 'Post them in the channel instead of privately', type: 5, required: false },
+  ],
+};
+
+const ALL_COMMANDS = [START_COMMAND, STATS_COMMAND];
 
 InstallGlobalCommands(process.env.APP_ID, ALL_COMMANDS);

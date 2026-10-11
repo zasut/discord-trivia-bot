@@ -694,6 +694,53 @@ async function cheatRules() {
   assert.match(peek.calls[0].payload.content, /\(5 answers\)/, 'Casual answers and timeouts are not in Peek');
 }
 
+// --- stats -----------------------------------------------------------------------------
+
+async function statsCommand() {
+  console.log('\n--- /stats ---');
+  freshWorld(31);
+
+  const none = await send('/stats with no games', discord.command('stats', ann, { channelId: CHANNEL }), 'reply');
+  assert.equal(none.calls[0].payload.content, 'No games yet. Run `/start`!');
+  assert.equal(none.calls[0].payload.flags, 64, 'private');
+
+  // A short Standard run: one right, one wrong, then quit.
+  const sid = await startSolo('standard');
+  await pickTile(sid);
+  await answer(sid, { correct: true });
+  await pickTile(sid);
+  await answer(sid, { correct: false });
+  await press('Quit', cid.quit(sid), ann, 'deferUpdate');
+
+  const mine = await send('/stats', discord.command('stats', ann, { channelId: CHANNEL }), 'reply');
+  const text = mine.calls[0].payload.content;
+  assert.equal(mine.calls[0].payload.flags, 64, 'private by default');
+  assert.deepEqual(mine.calls[0].payload.allowedMentions, { parse: [] });
+  assert.match(text, /^📊 \*\*Stats for <@1001>\*\*/);
+  assert.match(text, /\*\*Overall:\*\* 2 answered · 1 correct \(50%\) · avg /);
+  assert.match(text, /\*\*By grade:\*\* 1st 50% · 2nd – /);
+  assert.match(text, /\*\*Standard:\*\* 1 run · 0 cleared · best 1 correct/);
+
+  // A Casual run is saved but changes nothing.
+  const casual = await startSolo('casual');
+  await pickTile(casual);
+  await answer(casual, { correct: true });
+  await press('Quit', cid.quit(casual), ann, 'deferUpdate');
+  assert.equal(row('SELECT COUNT(*) AS n FROM guesses').n, 3, 'the Casual guess was saved');
+  const after = await send('/stats after a Casual run', discord.command('stats', ann, { channelId: CHANNEL }), 'reply');
+  assert.match(after.calls[0].payload.content, /\*\*Overall:\*\* 2 answered · 1 correct \(50%\)/);
+
+  // `share` makes it public.
+  const shared = await send('/stats share:true', discord.command('stats', ann, { channelId: CHANNEL, options: { share: true } }), 'reply');
+  assert.equal(shared.calls[0].payload.flags, undefined, 'a shared reply is public');
+
+  // Looking at other people.
+  const nobody = await send('/stats user:Ben (no games)', discord.command('stats', ann, { channelId: CHANNEL, options: { user: ben } }), 'reply');
+  assert.equal(nobody.calls[0].payload.content, "<@1002> hasn't played yet.");
+  const theirs = await send("Ben: /stats user:Ann", discord.command('stats', ben, { channelId: CHANNEL, options: { user: ann } }), 'reply');
+  assert.match(theirs.calls[0].payload.content, /Stats for <@1001>/);
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
@@ -713,6 +760,7 @@ try {
   await standardCheat();
   await hardHasNoCheats();
   await cheatRules();
+  await statsCommand();
   console.log('\nsmoke: PASS');
   process.exit(0);
 } catch (err) {

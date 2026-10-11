@@ -152,6 +152,19 @@ Then type `/start` in a channel the bot can see.
 
 Timings and difficulties live in `constants.js`.
 
+## Stats
+
+Every guess is saved, so there is a lot to look at. `/stats` shows a player's numbers:
+
+- `/stats` shows your own, privately. `/stats user:@someone` shows theirs.
+  `/stats share:true` posts it in the channel instead.
+- It covers questions answered, % correct and average answer time overall, by grade and by
+  subject, plus your Standard and Hard runs (how many, how many you cleared, your best).
+- **Casual games don't count**, and a timeout counts as a wrong answer.
+
+If you updated from an earlier version, run `npm run register` again so Discord learns about
+`/stats`.
+
 ## Project layout
 
 | File | What it's for |
@@ -169,7 +182,7 @@ Timings and difficulties live in `constants.js`.
 | `utils.js` | Small helpers for the Discord REST API (used to register commands). |
 | `db.js` | Opens the SQLite database and applies schema migrations. |
 | `records.js` | Saves players, games, questions asked, guesses and cheat uses. |
-| `stats.js` | Stats queries. |
+| `stats.js` | The stats queries and the text of `/stats`. |
 | `importer.js`, `csv.js` | Check a question CSV and load it into the database. |
 | `questions.js` | Looks questions up in the database. |
 | `rng.js` | All randomness, so tests can make it predictable. |

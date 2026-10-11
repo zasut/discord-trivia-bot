@@ -157,8 +157,19 @@ export function createFakeDiscord() {
     live,
     latest,
     holding,
+    // `options` is a plain object ({ user, share, by }) exposed like discord.js's option reader.
     command: (commandName, user, { channelId, guildId = 'guild1', options = {} } = {}) =>
-      build('command', { user, channelId, guildId, commandName, options }),
+      build('command', {
+        user,
+        channelId,
+        guildId,
+        commandName,
+        options: {
+          getUser: (name) => options[name] ?? null,
+          getBoolean: (name) => options[name] ?? null,
+          getString: (name) => options[name] ?? null,
+        },
+      }),
     button: (customId, user, { channelId, guildId = 'guild1', failOn } = {}) =>
       build('button', { user, channelId, guildId, customId, failOn }),
     select: (customId, user, values, { channelId, guildId = 'guild1' } = {}) =>

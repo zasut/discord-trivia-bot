@@ -70,7 +70,7 @@ script, point it at a scratch file and set `TRIVIA_DB_PATH` to a scratch databas
 | File | Role |
 |---|---|
 | `app.js` | Thin shell. Opens the database (seeding the sample questions if it is empty), creates the discord.js `Client` (intent `Guilds` only), logs in and forwards every `InteractionCreate` to `handleInteraction`. If a handler throws, it sends the user an ephemeral error notice. |
-| `flow.js` | `handleInteraction`, the single router for commands, buttons and modal submits, plus the ephemeral `/start` setup screens. |
+| `flow.js` | `handleInteraction`, the single router for commands, buttons and modal submits, plus the ephemeral `/start` setup screens and the `/stats` command. |
 | `solo.js` | Solo runs: the board, questions, answers, lives, timers and the end-of-run summary. |
 | `board.js` | Building the Fifth Grader board from the question bank, the climb rule, and rendering it as button rows. |
 | `ui.js` | Payload builders: `button`, `row`, question / result text, the answer modal, `publicPayload`, `displayName`. Pure. |
@@ -82,7 +82,7 @@ script, point it at a scratch file and set `TRIVIA_DB_PATH` to a scratch databas
 | `db.js` | `initDb(path)` / `getDb()` / `closeDb()` / `transaction(fn)`, the numbered migrations and the stale-game cleanup. |
 | `records.js` | Every database write for games: players, games, teams, questions shown, guesses, cheat uses. |
 | `questions.js` | Question queries (reads only): `getQuestion`, `subjectsAvailable`, `pickQuestionForTile`, `hasUnusedQuestion`, `countActiveQuestions`. |
-| `stats.js` | Stats queries (reads only): `bestHardRun`, Peek's `peekCount` / `peekAnswers`, and the `COUNTED` SQL condition. |
+| `stats.js` | Stats queries (reads only) and the `/stats` text: `getPlayerStats`, `formatStats`, `bestHardRun`, Peek's `peekCount` / `peekAnswers`, and the `COUNTED` SQL condition. |
 | `importer.js` | `parseQuestions` (validate CSV text), `importQuestions` (upsert), `importFile`, `seedSampleQuestions`. |
 | `csv.js` | RFC 4180 CSV parser, no dependency. |
 | `rng.js` | `random`, `randomInt`, `pick`, `shuffle`. All randomness goes through it so tests can call `setRng(fn)` / `resetRng()`. |
@@ -117,7 +117,10 @@ DESIGN.md "Database"; the schema itself is the `MIGRATIONS` array in `db.js`.
   `questions` table, and it deactivates questions rather than deleting them because guesses
   reference them.
 - A guess is **counted** (toward stats) unless it was made in a Casual solo run. Casual
-  guesses are still saved. `stats.js` exports `COUNTED`, the SQL condition for this.
+  guesses are still saved. `stats.js` exports `COUNTED`, the SQL condition for this: use it
+  in every stats query (the games table must be aliased `gm`). A timeout is a counted guess
+  that was wrong, with no `response_ms`. A solo "run" only counts toward run statistics if
+  it got at least one guess.
 
 ## Interaction flow
 
@@ -325,9 +328,13 @@ Created by `createSession` in `state.js`, then extended by `solo.startSolo`:
 
 ## Slash commands
 
-`/start` is the only command so far. It is defined in `commands.js` with `type: 1`,
-`integration_types: [0]` and `contexts: [0]` (servers only, because games are posted by the
-bot into a channel).
+| Command | What it does |
+|---|---|
+| `/start` | Opens the ephemeral setup; see Interaction flow. |
+| `/stats [user] [share]` | A player's stats (default: you) from their counted guesses: overall, by grade, by subject (top 10), Standard and Hard runs. Private unless `share` is true. A player with no counted guesses gets "No games yet. Run `/start`!" (or "@name hasn't played yet."). |
+
+Both are defined in `commands.js` with `type: 1`, `integration_types: [0]` and
+`contexts: [0]` (servers only, because games are posted by the bot into a channel).
 
 **Adding a command:** define it in `commands.js`, add it to `ALL_COMMANDS`, handle its
 `interaction.commandName` in `handleCommand` (`flow.js`) and add a step to
@@ -337,8 +344,7 @@ a few minutes to appear.
 ## Known gaps
 
 - **Trivia night is not implemented** (Phase 5): its setup button is disabled.
-- **No `/stats` or `/leaderboard`** yet (Phases 4 and 6). The queries so far are
-  `bestHardRun` and Peek's.
+- **No `/leaderboard`** yet (Phase 6), and `/stats` has no trivia-night section (Phase 5).
 - Quit only exists on the board, so a player in the middle of a question can't quit until it
   is answered or times out.
 - A restart abandons games in progress. Their messages stay in the channel with dead
@@ -356,6 +362,6 @@ and record any judgment call in its Decisions log. The phases, in order:
 1. **Database and question import** — done.
 2. **Solo board game** — done.
 3. **Cheats** (Peek, 50/50, Swap, Extra time) — done.
-4. **Stats:** `/stats`.
+4. **Stats:** `/stats` — done.
 5. **Trivia night:** sign-up, teams, rotating answerers, Ask a teammate, host controls.
 6. **Leaderboard and analysis:** `/leaderboard` and saved SQL queries.

@@ -588,8 +588,8 @@ Commit: `Add cheats to solo games`
 
 ### Phase 4: Stats
 
-- [ ] `stats.js` and `/stats [user] [share]`, without the trivia-night section yet.
-- [ ] Tests:
+- [x] `stats.js` and `/stats [user] [share]`, without the trivia-night section yet.
+- [x] Tests:
   - Unit tests against an in-memory database seeded with known games, checking every
     number, including that Casual is excluded and timeouts count as wrong.
   - Smoke step for `/stats`.
@@ -693,3 +693,15 @@ for every judgment call they make during implementation.
   them with that normalised text.
 - Phase 3: Quit only exists on the board. A player mid-question can't quit until the
   question is answered or times out.
+- Phase 4: a solo run only counts as a run (for run totals, clears, best score and the
+  per-run average) if it got at least one guess. Abandoned boards that were never played
+  are ignored.
+- Phase 4: "best" for Standard is the most correct answers in one Standard run, the same
+  measure as Hard's best run. The per-run average covers Standard and Hard runs together.
+- Phase 4: percentages are rounded to whole numbers; the average answer time to one
+  decimal place of seconds. By-subject groups by subject name across packs.
+- Phase 4: sections with nothing to show are left out of `/stats` (no Hard line without a
+  Hard run), except By grade, which always lists all five grades and shows `–` for a grade
+  never asked.
+- Phase 4: when the viewed player has no counted guesses, the reply is "No games yet. Run
+  `/start`!" for yourself and "@name hasn't played yet." for someone else.
