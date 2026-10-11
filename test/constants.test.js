@@ -19,6 +19,7 @@ describe('custom_id round trip', () => {
     ['ans', ['12', '3']],
     ['typed', ['12']],
     ['typedSubmit', ['12']],
+    ['cheat', ['12', 'peek']],
   ];
   for (const [kind, args] of cases) {
     test(kind, () => {

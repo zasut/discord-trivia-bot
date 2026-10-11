@@ -439,6 +439,7 @@ board.js         board building + rendering shared by solo and night
 ui.js            button / row / select / modal builders, question rendering
 messages.js      send / edit / delete public messages by channel id
 answers.js       typed-answer normalization + answer checking (pure)
+cheats.js        cheat rules: availability, 50/50 selection, Peek text
 questions.js     question queries: pick for a tile, availability checks, Peek distribution
 csv.js           RFC 4180 CSV parser (pure)
 importer.js      CSV validation + upsert into the database, sample seeding
@@ -452,6 +453,7 @@ commands.js      slash-command definitions
 scripts/import-questions.js   npm run import
 scripts/smoke.js              offline end-to-end test with a fake client
 scripts/fakes.js              the fake Discord client + interaction builders the smoke test uses
+scripts/testdata.js           helpers that record finished games straight into the database
 questions/sample.csv          committed placeholder questions
 test/*.test.js                unit tests (node:test)
 docs/queries.sql              example analysis queries
@@ -575,9 +577,9 @@ Commit: `Add solo board game with difficulties`
 
 ### Phase 3: Cheats
 
-- [ ] Peek, 50/50, Swap and Extra time with the availability rules, the per-difficulty
+- [x] Peek, 50/50, Swap and Extra time with the availability rules, the per-difficulty
   limits and `cheat_uses` records.
-- [ ] Tests:
+- [x] Tests:
   - Unit tests for availability.
   - Smoke test: a Casual run using every cheat, and a Standard run showing the cheat row
     disappears after one use.
@@ -675,3 +677,19 @@ for every judgment call they make during implementation.
 - Phase 2: the question-picking preference for fewer-seen questions counts every earlier
   guess by that player on the question, including timeouts and Casual ones.
 - Phase 2: the typed-answer text box allows up to 100 characters.
+- Phase 3: Swap consumes a `seq` (the swapped-out question keeps its `game_questions` row
+  with `swapped = 1`, the replacement gets the next `seq`), so buttons from the old
+  question go stale on their own. A swapped-in question starts with a fresh set of
+  used cheats, so on Casual every cheat is available again on it.
+- Phase 3: a cheat is recorded in `cheat_uses` against the question it was used on, which
+  for Swap is the question that was swapped out.
+- Phase 3: Peek's data count and Swap's availability are worked out once, when a question
+  is shown, not on every redraw.
+- Phase 3: Peek replies privately, and the question message is refreshed separately by id
+  so the used Peek button turns off.
+- Phase 3: 50/50 strikes `choices - 2` wrong answers (one on a 3-choice question, two on a
+  4-choice question) and is not offered on 2-choice questions.
+- Phase 3: Peek's typed-answer summary groups guesses by their normalised text and lists
+  them with that normalised text.
+- Phase 3: Quit only exists on the board. A player mid-question can't quit until the
+  question is answered or times out.

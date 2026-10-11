@@ -12,12 +12,13 @@
 import assert from 'node:assert/strict';
 import { dropSetup, handleInteraction } from '../flow.js';
 import { onBoardIdle, onQuestionTimeout } from '../solo.js';
-import { cid, parseCustomId, timing } from '../constants.js';
+import { TIMERS, cid, parseCustomId, timing } from '../constants.js';
 import { closeDb, getDb, initDb } from '../db.js';
 import { seedSampleQuestions } from '../importer.js';
 import { setRng } from '../rng.js';
 import { getSession, resetSessions } from '../state.js';
 import { componentsOf, createFakeDiscord, makeUser, seededRng } from './fakes.js';
+import { playSolo } from './testdata.js';
 
 const CHANNEL = 'chan1';
 const OTHER_CHANNEL = 'chan2';
@@ -508,6 +509,191 @@ async function failedAcknowledgements() {
   assert.equal(row('SELECT status FROM games').status, 'quit');
 }
 
+// --- cheats ----------------------------------------------------------------------------
+
+// Give every active question `count` earlier counted answers from other players, so Peek
+// has something to show.
+function seedHistory(count = 6) {
+  for (const { id, type } of rows('SELECT id, type FROM questions WHERE active = 1')) {
+    for (let i = 0; i < count; i++) {
+      playSolo({
+        userId: `hist${i}`,
+        guesses: [{ questionId: id, answer: type === 'choice' ? 'ABC'[i % 3] : `guess${i % 2}`, correct: false }],
+      });
+    }
+  }
+}
+
+const cheatButtons = () => buttons(latest()).filter((b) => parseCustomId(b.custom_id).kind === 'cheat');
+const CHEAT_LABELS = ['👀 Peek', '✂️ 50/50', '🔄 Swap', '⏱️ Extra time'];
+
+async function casualCheats() {
+  console.log('\n--- Casual: every cheat ---');
+  freshWorld(21);
+  seedHistory();
+  const sid = await startSolo('casual');
+  assert.match(latest().content, /🃏 ∞/);
+
+  const first = await pickTile(sid); // 1st · Animals: both questions are multiple choice
+  assert.equal(first.question.type, 'choice');
+  const message = latest();
+  assert.deepEqual(cheatButtons().map((b) => b.label), CHEAT_LABELS);
+  assert.ok(cheatButtons().every((b) => !b.disabled), 'everything is available at first');
+
+  // 50/50 strikes wrong answers, never the right one, and can't be reused on the question.
+  const fiftyId = cheatButtons()[1].custom_id;
+  await press('50/50', fiftyId, ann, 'update');
+  const q = getSession(sid).run.q;
+  const correctPosition = q.order.indexOf('ABCD'.indexOf(q.question.answer));
+  assert.equal(q.struck.length, q.question.choices.length - 2, 'two choices remain');
+  assert.ok(!q.struck.includes(correctPosition), 'never strikes the right answer');
+  assert.equal((message.content.match(/~~/g) ?? []).length, q.struck.length * 2, 'struck options are crossed out');
+  const answerButtons = buttons(latest()).filter((b) => parseCustomId(b.custom_id).kind === 'ans');
+  assert.deepEqual(answerButtons.map((b) => b.disabled), q.order.map((_, p) => q.struck.includes(p)));
+  assert.equal(cheatButtons()[1].disabled, true, '50/50 is used up on this question');
+  await press('50/50 again', fiftyId, ann, 'deferUpdate');
+  assert.equal(row('SELECT COUNT(*) AS n FROM cheat_uses').n, 1);
+
+  // Peek answers privately and refreshes the question message.
+  const peek = await press('Peek', cheatButtons()[0].custom_id, ann, 'reply');
+  assert.equal(peek.calls[0].payload.flags, 64, 'Peek is ephemeral');
+  assert.match(peek.calls[0].payload.content, /^👀 \*\*Peek\*\*\nA \d+% · B \d+% · C \d+%( · D \d+%)? \(6 answers\)$/);
+  assert.equal(cheatButtons()[0].disabled, true, 'the question message was refreshed');
+
+  // Extra time adds one full base timer and shows the new deadline.
+  const before = q.deadlineMs;
+  await press('Extra time', cheatButtons()[3].custom_id, ann, 'update');
+  assert.equal(q.deadlineMs, before + TIMERS.solo.choice);
+  assert.ok(latest().content.includes(`<t:${Math.ceil(q.deadlineMs / 1000)}:R>`));
+  assert.ok(getSession(sid).timer, 'the question timer was re-armed');
+
+  // Swap replaces the question in the same message, with a fresh state.
+  await press('Swap', cheatButtons()[2].custom_id, ann, 'update');
+  const swapped = getSession(sid).run.q;
+  assert.notEqual(swapped.question.id, q.question.id);
+  assert.equal(swapped.seq, q.seq + 1);
+  assert.equal(latest().id, message.id, 'the same message was edited');
+  assert.ok(latest().content.includes(swapped.question.prompt));
+  assert.deepEqual(swapped.struck, []);
+  assert.equal(
+    swapped.deadlineMs - swapped.shownAtMs,
+    TIMERS.solo[swapped.question.type],
+    'a fresh timer, without the extra time',
+  );
+  await send(
+    'stale answer from the swapped-out question',
+    discord.button(cid.ans(sid, q.seq, 0), ann, { channelId: CHANNEL }),
+    'deferUpdate',
+  );
+  // Both Animals questions have now been used, so another Swap is impossible; the rest refresh.
+  assert.deepEqual(
+    cheatButtons().map((b) => b.disabled),
+    [false, false, true, false],
+    'cheats reset for the new question, but there is nothing left to swap to',
+  );
+
+  // Answer the new question; only it gets a guess.
+  await answer(sid, { correct: true });
+  assert.match(latest().content, /🃏 ∞/);
+  assert.equal(row("SELECT COUNT(*) AS n FROM guesses WHERE user_id = '1001'").n, 1);
+  const gameId = row("SELECT id FROM games WHERE host_id = '1001'").id;
+  const asked = rows('SELECT id, seq, swapped FROM game_questions WHERE game_id = ? ORDER BY seq', gameId);
+  assert.deepEqual(asked.map((g) => [g.seq, g.swapped]), [[0, 1], [1, 0]]);
+  const uses = rows('SELECT cheat, game_question_id FROM cheat_uses ORDER BY id');
+  assert.deepEqual(uses.map((u) => u.cheat), ['fifty', 'peek', 'extra_time', 'swap']);
+  assert.ok(uses.every((u) => u.game_question_id === asked[0].id), 'recorded against the question they were used on');
+  assert.equal(row("SELECT game_question_id FROM guesses WHERE user_id = '1001'").game_question_id, asked[1].id);
+
+  await press('Quit', cid.quit(sid), ann, 'deferUpdate');
+  assert.match(latest().content, /\*\*1\/1\*\* correct · 4 cheats used/);
+}
+
+async function standardCheat() {
+  console.log('\n--- Standard: one cheat per run ---');
+  freshWorld(22);
+  seedHistory();
+  const sid = await startSolo('standard');
+  assert.match(latest().content, /🃏 1/);
+
+  const q1 = await pickTile(sid);
+  assert.equal(cheatButtons().length, 4);
+  await press('Extra time', cheatButtons()[3].custom_id, ann, 'update');
+  assert.equal(cheatButtons().length, 0, 'the cheat row is gone once the cheat is spent');
+  assert.equal(
+    buttons(latest()).filter((b) => parseCustomId(b.custom_id).kind === 'ans').length,
+    q1.order.length,
+    'the answer buttons stay',
+  );
+  await send('forged Peek', discord.button(cid.cheat(sid, q1.seq, 'peek'), ann, { channelId: CHANNEL }), 'deferUpdate');
+  assert.equal(row('SELECT COUNT(*) AS n FROM cheat_uses').n, 1, 'no second cheat');
+
+  await answer(sid, { correct: true });
+  assert.match(latest().content, /🃏 0/);
+  const q2 = await pickTile(sid);
+  assert.equal(cheatButtons().length, 0, 'no cheat row on later questions either');
+  await send('forged Swap', discord.button(cid.cheat(sid, q2.seq, 'swap'), ann, { channelId: CHANNEL }), 'deferUpdate');
+  assert.equal(getSession(sid).run.q, q2, 'the question is unchanged');
+  await answer(sid, { correct: true });
+
+  await press('Quit', cid.quit(sid), ann, 'deferUpdate');
+  assert.match(latest().content, /\*\*2\/2\*\* correct · 1 cheat used/);
+}
+
+async function hardHasNoCheats() {
+  console.log('\n--- Hard: no cheats ---');
+  freshWorld(23);
+  seedHistory();
+  const sid = await startSolo('hard');
+  assert.ok(!/🃏/.test(latest().content), 'Hard does not show a cheat count');
+  const q = await pickTile(sid);
+  assert.equal(cheatButtons().length, 0);
+  await send('forged 50/50', discord.button(cid.cheat(sid, q.seq, 'fifty'), ann, { channelId: CHANNEL }), 'deferUpdate');
+  assert.deepEqual(getSession(sid).run.q.struck, []);
+  assert.equal(row('SELECT COUNT(*) AS n FROM cheat_uses').n, 0);
+}
+
+async function cheatRules() {
+  console.log('\n--- Cheat availability rules ---');
+  freshWorld(24);
+  // Grade 1 now has one typed Math question (-2) and one 3-choice Animals question (-3).
+  getDb().prepare('UPDATE questions SET active = 0 WHERE id IN (-1, -4)').run();
+  // Earlier answers to -3: 4 counted ones, plus 3 Casual and 2 timeouts that must not count.
+  for (let i = 0; i < 4; i++) playSolo({ userId: `hist${i}`, guesses: [{ questionId: -3, answer: 'A' }] });
+  for (let i = 4; i < 7; i++) playSolo({ userId: `hist${i}`, difficulty: 'casual', guesses: [{ questionId: -3, answer: 'A' }] });
+  for (let i = 7; i < 9; i++) playSolo({ userId: `hist${i}`, guesses: [{ questionId: -3, timedOut: true }] });
+
+  const sid = await startSolo('casual');
+  const typed = await pickTile(sid, ann, (b) => /Math/.test(b.label));
+  assert.equal(typed.question.id, -2);
+  assert.deepEqual(
+    cheatButtons().map((b) => b.disabled),
+    [true, true, true, false],
+    'typed question: no Peek data, no 50/50, nothing to swap to; Extra time always works',
+  );
+  await answer(sid, { correct: true });
+
+  const animals = await pickTile(sid);
+  assert.equal(animals.question.id, -3);
+  assert.deepEqual(
+    cheatButtons().map((b) => b.disabled),
+    [true, false, true, false],
+    'only 4 counted answers (Casual and timeouts are left out): no Peek yet. 50/50 works on 3 choices.',
+  );
+  await press('50/50', cheatButtons()[1].custom_id, ann, 'update');
+  assert.equal(getSession(sid).run.q.struck.length, 1, 'one wrong choice struck from three');
+  await answer(sid, { correct: true });
+  await press('Quit', cid.quit(sid), ann, 'deferUpdate'); // Quit is on the board, not on a question
+
+  // A fifth counted answer arrives, so a new game offers Peek.
+  playSolo({ userId: 'hist9', guesses: [{ questionId: -3, answer: 'B' }] });
+  const sid2 = await startSolo('casual');
+  const again = await pickTile(sid2);
+  assert.equal(again.question.id, -3);
+  assert.equal(cheatButtons()[0].disabled, false, 'Peek is available at 5 counted answers');
+  const peek = await press('Peek', cheatButtons()[0].custom_id, ann, 'reply');
+  assert.match(peek.calls[0].payload.content, /\(5 answers\)/, 'Casual answers and timeouts are not in Peek');
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
@@ -523,6 +709,10 @@ try {
   await lateAnswers();
   await bankChangesMidGame();
   await failedAcknowledgements();
+  await casualCheats();
+  await standardCheat();
+  await hardHasNoCheats();
+  await cheatRules();
   console.log('\nsmoke: PASS');
   process.exit(0);
 } catch (err) {

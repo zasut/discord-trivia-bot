@@ -5,6 +5,7 @@
 
 import { ButtonStyle, ComponentType, TextInputStyle, escapeMarkdown } from 'discord.js';
 import { LETTERS } from './answers.js';
+import { CHEATS } from './cheats.js';
 import { cid } from './constants.js';
 
 // Mentions still render as names but never notify anyone.
@@ -64,6 +65,16 @@ export function answerRow(sid, { seq, question, order, struck = [] }) {
       button(cid.ans(sid, seq, position), LETTERS[position], ButtonStyle.Primary, {
         disabled: struck.includes(position),
       }),
+    ),
+  );
+}
+
+// The row of cheat buttons. `available[kind]` says which can be used right now; the rest
+// are drawn disabled.
+export function cheatRow(sid, seq, available) {
+  return row(
+    ...CHEATS.map(({ kind, label }) =>
+      button(cid.cheat(sid, seq, kind), label, ButtonStyle.Secondary, { disabled: !available[kind] }),
     ),
   );
 }

@@ -50,6 +50,19 @@ export function subjectsAvailable(pack, grade, excludeIds = []) {
     .map((row) => ({ ...row }));
 }
 
+// Is there at least one unused active question for this tile? (Swap needs one.)
+export function hasUnusedQuestion({ pack, grade, subject, excludeIds = [] }) {
+  const exclude = notIn('id', excludeIds);
+  return (
+    getDb()
+      .prepare(
+        `SELECT 1 AS found FROM questions
+          WHERE pack = ? AND grade IS ? AND subject = ? AND active = 1${exclude.sql} LIMIT 1`,
+      )
+      .get(pack, grade, subject, ...exclude.params) !== undefined
+  );
+}
+
 // A random unused active question for a tile (pack + grade + subject), or undefined.
 // With a `userId`, prefers the questions that player has guessed on the fewest times, so
 // repeat players see fresh questions first.

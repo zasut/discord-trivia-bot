@@ -105,6 +105,7 @@ export const cid = {
   ans: id('ans'), //            (sid, seq, displayedPosition)
   typed: id('typed'), //        (sid, seq): opens the answer modal
   typedSubmit: id('typedSubmit'), // (sid, seq): the modal's own id
+  cheat: id('cheat'), //        (sid, seq, 'peek' | 'fifty' | 'swap' | 'time')
 };
 
 // parseCustomId(componentId) -> { kind, sid, args }. Anything that isn't one of ours, or

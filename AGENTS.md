@@ -76,12 +76,13 @@ script, point it at a scratch file and set `TRIVIA_DB_PATH` to a scratch databas
 | `ui.js` | Payload builders: `button`, `row`, question / result text, the answer modal, `publicPayload`, `displayName`. Pure. |
 | `messages.js` | `sendMessage` / `editMessage` / `deleteMessage` by channel id. Mentions never ping. |
 | `answers.js` | Typed-answer normalisation and checking. Pure. |
+| `cheats.js` | The solo cheats: the cheat list, `cheatAvailability` (which are usable), `pickStruck` (50/50) and `peekText`. Pure apart from the rng. |
 | `constants.js` | `PACKS`, `DIFFICULTIES`, tunables, `timing`, and the `cid` custom_id builders + `parseCustomId`. |
 | `state.js` | In-memory session `Map` keyed by `sid`, plus the one-timer-per-session helpers `armTimer` / `clearTimer`. |
 | `db.js` | `initDb(path)` / `getDb()` / `closeDb()` / `transaction(fn)`, the numbered migrations and the stale-game cleanup. |
 | `records.js` | Every database write for games: players, games, teams, questions shown, guesses, cheat uses. |
-| `questions.js` | Question queries (reads only): `getQuestion`, `subjectsAvailable`, `pickQuestionForTile`, `countActiveQuestions`. |
-| `stats.js` | Stats queries (reads only). So far just `bestHardRun`. |
+| `questions.js` | Question queries (reads only): `getQuestion`, `subjectsAvailable`, `pickQuestionForTile`, `hasUnusedQuestion`, `countActiveQuestions`. |
+| `stats.js` | Stats queries (reads only): `bestHardRun`, Peek's `peekCount` / `peekAnswers`, and the `COUNTED` SQL condition. |
 | `importer.js` | `parseQuestions` (validate CSV text), `importQuestions` (upsert), `importFile`, `seedSampleQuestions`. |
 | `csv.js` | RFC 4180 CSV parser, no dependency. |
 | `rng.js` | `random`, `randomInt`, `pick`, `shuffle`. All randomness goes through it so tests can call `setRng(fn)` / `resetRng()`. |
@@ -90,7 +91,8 @@ script, point it at a scratch file and set `TRIVIA_DB_PATH` to a scratch databas
 | `questions/sample.csv` | 20 placeholder questions with negative ids. Loaded automatically when the database has no active questions. |
 | `scripts/import-questions.js` | The `npm run import` script. |
 | `scripts/smoke.js` | Offline end-to-end test: whole games driven through `handleInteraction`, then the database checked. |
-| `scripts/fakes.js` | The fake Discord used by the smoke test (and some unit tests): a recording client, interaction builders, and `seededRng`. |
+| `scripts/fakes.js` | The fake Discord used by the smoke test (and some unit tests): a recording client, interaction builders (with `failOn` to simulate a failed acknowledgement), and `seededRng`. |
+| `scripts/testdata.js` | Helpers that record finished games straight into the database (`playSolo`, `playNight`, `askQuestion`, `guessOn`), for stats and Peek tests. |
 | `test/*.test.js` | Unit tests (`node:test`). |
 | `DESIGN.md` | The agreed design (question bank, solo, trivia night, stats, database) and the phased build plan. |
 
@@ -140,6 +142,7 @@ anyone else gets an ephemeral "This is @Player's game."
    - Choice questions show shuffled `A)`–`D)` options with buttons `A`–`D`. Typed questions
      show an **Answer** button that opens a modal with one text box.
    - The message shows its deadline as `<t:UNIX:R>`. A timer (`TIMERS.solo`) is armed for it.
+   - A second row of **cheat buttons** shows while the run has cheats left (see Cheats below).
 3. **Answering** (or the timer firing) records the guess, edits the question message to its
    result with no buttons, waits `timing.resultReadMs`, then posts a fresh board. A miss
    costs a life.
@@ -151,8 +154,20 @@ anyone else gets an ephemeral "This is @Player's game."
 | | Hard | Standard | Casual |
 |---|---|---|---|
 | Lives | 1 | 3 | unlimited |
-| Cheats (not built yet, Phase 3) | none | 1 per run | unlimited |
+| Cheats | none | 1 per run | unlimited |
 | Stats | counted + own Hard section | counted | saved, not counted |
+
+**Cheats** (`onCheat` in `solo.js`, rules in `cheats.js`). Each can be used at most once per
+question, even on Casual. A cheat doesn't pause the timer. The cheat row disappears once the
+run has no cheats left (always on Hard, after the first on Standard). Unavailable cheats
+are drawn disabled. Every use is recorded in `cheat_uses` against the question it was used on.
+
+| Cheat | Effect | Available when |
+|---|---|---|
+| **Peek** | Ephemeral reply: how other players answered, as percentages (choice letters as currently displayed; top 3 for typed). The question message is refreshed separately. | `PEEK_MIN_ANSWERS` counted, non-timeout guesses from other games |
+| **50/50** | Strikes wrong choices until two remain (`q.struck`, shown as ~~text~~ with disabled buttons). | choice question with 3+ choices |
+| **Swap** | Replaces the question in the same message: the old game question is marked `swapped` (no guess), the new one gets the next `seq` and a fresh timer. | another unused question exists for the tile |
+| **Extra time** | Adds one base timer to the deadline and re-arms the timer. | always |
 
 A button whose `sid` has no live session (bot restarted, game over, setup timed out) gets an
 ephemeral *"That trivia session expired — run `/start` again."* (a modal submit gets
@@ -212,6 +227,7 @@ state a button carries. Build ids only with `cid.*` and parse them only with
 | `ans` | `seq`, displayed position (0–3) | choice answer |
 | `typed` | `seq` | opens the answer modal |
 | `typedSubmit` | `seq` | the modal's own id |
+| `cheat` | `seq`, `peek` / `fifty` / `swap` / `time` | cheat row on a solo question |
 
 - `sid` is `crypto.randomUUID()` with the dashes stripped: exactly 32 hex characters.
   Kinds and args must not contain `:` (`cid.*` throws if they do) and an id must fit
@@ -246,11 +262,16 @@ Created by `createSession` in `state.js`, then extended by `solo.startSolo`:
     seq,         // next game_questions.seq
     correct, misses, asked,
     livesLeft,   // Infinity on Casual
+    cheatsLeft,  // Infinity on Casual, 0 on Hard
+    cheatsUsed,  // for the summary
     q: {         // the question on screen (or the last one answered)
       seq, gameQuestionId, tileIndex, question,
       order,     // choice questions: position -> index into question.choices
-      struck,    // positions eliminated (50/50, Phase 3)
+      struck,    // positions eliminated by 50/50
       shownAtMs, deadlineMs, answered,
+      cheatsUsed,    // Set of cheat kinds used on this question
+      peekTotal,     // counted answers from other games, computed when shown
+      swapAvailable, // another unused question exists for the tile
     },
   },
 }
@@ -293,13 +314,14 @@ Created by `createSession` in `state.js`, then extended by `solo.startSolo`:
 |---|---|---|
 | `TIMERS.solo.choice` / `.typed` | `constants.js` | 20 s / 45 s answer window |
 | `STANDARD_LIVES` | `constants.js` | 3 |
+| `PEEK_MIN_ANSWERS` | `constants.js` | 5: counted answers needed before Peek is offered |
 | `SETUP_IDLE_MS` | `constants.js` | 15 min: drop an unfinished setup |
 | `BOARD_IDLE_MS` | `constants.js` | 5 min: untouched board → abandoned |
 | `timing.resultReadMs` | `constants.js` | 1500: pause after a result (tests set it to 0) |
 | `DIFFICULTIES`, `PACKS` | `constants.js` | the difficulties and packs |
 
-`constants.js` also defines the later phases' tunables (`TIMERS.night`, `PEEK_MIN_ANSWERS`,
-`SIGNUP_IDLE_MS`, `NIGHT_IDLE_MS`, `LEADERBOARD_MIN_ANSWERS`), which nothing uses yet.
+`constants.js` also defines the later phases' tunables (`TIMERS.night`, `SIGNUP_IDLE_MS`,
+`NIGHT_IDLE_MS`, `LEADERBOARD_MIN_ANSWERS`), which nothing uses yet.
 
 ## Slash commands
 
@@ -314,10 +336,11 @@ a few minutes to appear.
 
 ## Known gaps
 
-- **Cheats are not implemented** (Phase 3): `DIFFICULTIES` already says how many each
-  difficulty gets, but there are no cheat buttons.
 - **Trivia night is not implemented** (Phase 5): its setup button is disabled.
-- **No `/stats` or `/leaderboard`** yet (Phases 4 and 6). Only `bestHardRun` exists.
+- **No `/stats` or `/leaderboard`** yet (Phases 4 and 6). The queries so far are
+  `bestHardRun` and Peek's.
+- Quit only exists on the board, so a player in the middle of a question can't quit until it
+  is answered or times out.
 - A restart abandons games in progress. Their messages stay in the channel with dead
   buttons, which answer with the "expired" reply.
 - If the bank changes under a running game (an import deactivates a tile's questions), that
@@ -332,7 +355,7 @@ and record any judgment call in its Decisions log. The phases, in order:
 
 1. **Database and question import** — done.
 2. **Solo board game** — done.
-3. **Cheats:** Peek, 50/50, Swap, Extra time.
+3. **Cheats** (Peek, 50/50, Swap, Extra time) — done.
 4. **Stats:** `/stats`.
 5. **Trivia night:** sign-up, teams, rotating answerers, Ask a teammate, host controls.
 6. **Leaderboard and analysis:** `/leaderboard` and saved SQL queries.

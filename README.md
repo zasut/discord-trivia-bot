@@ -132,7 +132,14 @@ Then type `/start` in a channel the bot can see.
    | Cheats | none | 1 per run | unlimited |
    | Stats | count, plus a Hard section | count | saved but don't count |
 
-   (Cheats arrive in a later update.)
+   **Cheats** (shown under each question while you have some left, each usable once per
+   question):
+
+   - 👀 **Peek**: privately shows how other players answered this question (it needs at least
+     5 earlier answers).
+   - ✂️ **50/50**: crosses out wrong choices until two are left (multiple choice only).
+   - 🔄 **Swap**: replaces the question with another from the same tile.
+   - ⏱️ **Extra time**: adds more time to the clock.
 2. The bot posts the **board** in the channel: two tiles per grade, like "3rd · Science".
    Only the lowest grade you haven't finished is playable, so you climb from 1st to 5th.
    Only you can press the buttons in your game, and only one game can run per channel.
@@ -155,6 +162,7 @@ Timings and difficulties live in `constants.js`.
 | `board.js` | Builds the grade + subject board and draws it as buttons. |
 | `ui.js`, `messages.js` | Build the message text and buttons, and send / edit / delete messages in the channel. |
 | `answers.js` | Checks typed answers (ignoring case and punctuation, comparing numbers as numbers). |
+| `cheats.js` | The rules for Peek, 50/50, Swap and Extra time. |
 | `commands.js` | Defines and registers the slash commands. |
 | `constants.js` | The packs, difficulties, timings and the button ID scheme. |
 | `state.js` | In-memory store of games in progress. Not persisted — restarting the bot clears them. |
@@ -167,7 +175,7 @@ Timings and difficulties live in `constants.js`.
 | `rng.js` | All randomness, so tests can make it predictable. |
 | `questions/sample.csv` | 20 placeholder questions used when you haven't imported your own. |
 | `scripts/import-questions.js` | `npm run import`: loads your question CSV. |
-| `scripts/smoke.js`, `scripts/fakes.js` | Plays whole games locally against a fake Discord (`node scripts/smoke.js`). |
+| `scripts/smoke.js`, `scripts/fakes.js`, `scripts/testdata.js` | Plays whole games locally against a fake Discord (`node scripts/smoke.js`), with helpers for test data. |
 | `test/` | Unit tests (`npm test` runs these and the smoke test). |
 | `AGENTS.md` | Guide for coding agents: architecture, conventions, rules, and what's planned next. |
 | `DESIGN.md` | The planned design (solo boards, trivia nights, stats, database) and the build plan. |
